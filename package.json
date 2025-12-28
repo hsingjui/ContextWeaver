@@ -6,9 +6,9 @@
   "author": "hsingjui",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hsingjui/contextweaver.git"
+    "url": "git+https://github.com/hsingjui/ContextWeaver.git"
   },
-  "homepage": "https://github.com/hsingjui/contextweaver#readme",
+  "homepage": "https://github.com/hsingjui/ContextWeaver#readme",
   "private": false,
   "type": "module",
   "bin": {
