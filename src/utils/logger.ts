@@ -1,0 +1,200 @@
+import pino from "pino";
+import path from "path";
+import os from "os";
+import fs from "fs";
+import { Writable } from "stream";
+import { isDev } from "../config.js";
+
+const logLevel = isDev ? "debug" : "info";
+const logDir = path.join(os.homedir(), ".contextweaver", "logs");
+const LOG_RETENTION_DAYS = 7;
+
+function ensureLogDir(dir: string): void {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+function getLogFileName(): string {
+  const now = new Date();
+  const dateStr = now.toISOString().split("T")[0];
+  return `app.${dateStr}.log`;
+}
+
+function formatTime(): string {
+  const now = new Date();
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+
+function getLevelLabel(level: number): string {
+  const labels: Record<number, string> = {
+    10: "TRACE",
+    20: "DEBUG",
+    30: "INFO",
+    40: "WARN",
+    50: "ERROR",
+    60: "FATAL",
+  };
+  return labels[level] || "INFO";
+}
+
+function cleanupOldLogs(dir: string): void {
+  try {
+    if (!fs.existsSync(dir)) return;
+
+    const files = fs.readdirSync(dir);
+    const now = Date.now();
+    const maxAge = LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+    const logPattern = /^app\.(\d{4}-\d{2}-\d{2})\.log$/;
+
+    for (const file of files) {
+      const match = file.match(logPattern);
+      if (!match) continue;
+
+      const dateStr = match[1];
+      const fileDate = new Date(dateStr).getTime();
+
+      // 解析失败则跳过
+      if (isNaN(fileDate)) continue;
+
+      // 检查是否过期
+      if (now - fileDate > maxAge) {
+        const filePath = path.join(dir, file);
+        try {
+          fs.unlinkSync(filePath);
+          // 使用 console 而非 logger 避免循环依赖
+          console.log(`[Logger] 清理过期日志: ${file}`);
+        } catch {
+          // 删除失败时静默忽略
+        }
+      }
+    }
+  } catch {
+    // 清理失败时静默忽略，不影响主流程
+  }
+}
+
+// =========================================
+// 格式化流
+// =========================================
+
+// 自定义 Writable Stream 来格式化日志
+function createFormattedStream(filePath: string): Writable {
+  const writeStream = fs.createWriteStream(filePath, { flags: "a" });
+
+  return new Writable({
+    write(chunk: any, encoding: BufferEncoding, callback: (error?: Error | null) => void) {
+      try {
+        const log = JSON.parse(chunk.toString());
+        const time = formatTime();
+        const level = getLevelLabel(log.level);
+        const msg = log.msg || "";
+
+        // 提取额外的属性（排除 pino 内部字段）
+        const { level: _l, time: _t, pid: _p, hostname: _h, name: _n, msg: _m, ...extra } = log;
+
+        // 如果有额外属性，将其格式化为 JSON
+        let line = `${time} [${level}] ${msg}`;
+        if (Object.keys(extra).length > 0) {
+          // 美化输出：每个属性一行（便于查看）
+          const extraLines = JSON.stringify(extra, null, 2)
+            .split("\n")
+            .map((l, i) => i === 0 ? l : "    " + l)  // 缩进
+            .join("\n");
+          line += `\n    ${extraLines}`;
+        }
+
+        writeStream.write(line + "\n", callback);
+      } catch {
+        writeStream.write(chunk.toString(), callback);
+      }
+    },
+  });
+}
+
+// =========================================
+// Logger 创建
+// =========================================
+
+// 开发环境：写入 ~/.contextweaver/logs + 控制台输出
+function createDevLogger(): pino.Logger {
+  ensureLogDir(logDir);
+
+  // 启动时清理过期日志
+  cleanupOldLogs(logDir);
+
+  const logPath = path.join(logDir, getLogFileName());
+  const logStream = createFormattedStream(logPath);
+
+  // 控制台日志（彩色）
+  const consoleTransport = pino.transport({
+    target: "pino-pretty",
+    options: {
+      colorize: true,
+      translateTime: "SYS:yyyy-mm-dd HH:MM:ss",
+      ignore: "pid,hostname",
+    },
+  });
+
+  return pino(
+    {
+      level: logLevel,
+      name: "contextweaver",
+    },
+    pino.multistream([
+      { stream: logStream, level: logLevel },
+      { stream: consoleTransport, level: logLevel },
+    ])
+  );
+}
+
+// 生产环境：只写入 ~/.contextweaver/logs（无控制台输出）
+function createProdLogger(): pino.Logger {
+  ensureLogDir(logDir);
+
+  // 启动时清理过期日志
+  cleanupOldLogs(logDir);
+
+  const logPath = path.join(logDir, getLogFileName());
+  const logStream = createFormattedStream(logPath);
+
+  return pino(
+    {
+      level: logLevel,
+      name: "contextweaver",
+    },
+    logStream
+  );
+}
+
+// =========================================
+// 导出
+// =========================================
+
+// 导出 logger 实例
+export const logger = isDev ? createDevLogger() : createProdLogger();
+
+// 便捷方法（正确绑定 this）
+export const log = logger;
+export const info = logger.info.bind(logger);
+export const warn = logger.warn.bind(logger);
+export const error = logger.error.bind(logger);
+export const debug = logger.debug.bind(logger);
+
+/**
+ * 检查当前是否启用 debug 级别日志
+ * 
+ * 用于惰性求值，避免在非 debug 模式下构造复杂的日志参数
+ * 
+ * @example
+ * ```ts
+ * if (isDebugEnabled()) {
+ *   logger.debug({ expensiveComputation: computeStats() }, "调试信息");
+ * }
+ * ```
+ */
+export function isDebugEnabled(): boolean {
+  return logger.isLevelEnabled("debug");
+}

@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g., 0.1.1) (must have tag v0.1.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-and-publish:
+    name: Build and Publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code (tag on dispatch)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/v{0}', github.event.inputs.version) || github.ref }}
+
+      - name: Resolve release version
+        id: rel
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            INPUT="${{ github.event.inputs.version }}"
+            VER="${INPUT#v}"
+            echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+            echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "ver=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build:release
+
+      - name: Verify tag matches package.json version
+        run: |
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "${{ steps.rel.outputs.ver }}" != "$PKG" ]; then
+            echo "Version mismatch: tag v${{ steps.rel.outputs.ver }} != package.json $PKG"
+            exit 1
+          fi
+
+      - name: Check if version already exists on npm (dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        id: npmcheck
+        run: |
+          if npm view @hsingjui/contextweaver@${{ steps.rel.outputs.ver }} version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to NPM
+        if: github.event_name != 'workflow_dispatch' || steps.npmcheck.outputs.exists != 'true'
+        run: pnpm publish --no-git-checks --access public --provenance
+
+      # push tag 和手动重跑都创建/更新 GitHub Release（手动重跑时显式指定 tag_name）
+      - name: Create GitHub Release
+        if: startsWith(steps.rel.outputs.tag, 'v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.rel.outputs.tag }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          body: |
+            ## 🚀 ContextWeaver ${{ steps.rel.outputs.tag }}
+
+            ### Installation
+            ```bash
+            npm install -g @hsingjui/contextweaver
+            # or
+            pnpm add -g @hsingjui/contextweaver
+            ```

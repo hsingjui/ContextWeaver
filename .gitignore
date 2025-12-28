@@ -1,0 +1,8 @@
+node_modules
+openspec
+logs
+dist
+.env
+.claude
+.ace-tool/
+docs
