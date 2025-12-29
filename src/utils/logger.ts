@@ -3,7 +3,7 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 import { Writable } from "stream";
-import { isDev } from "../config.js";
+import { isDev, isMcpMode } from "../config.js";
 
 const logLevel = isDev ? "debug" : "info";
 const logDir = path.join(os.homedir(), ".contextweaver", "logs");
@@ -64,8 +64,8 @@ function cleanupOldLogs(dir: string): void {
         const filePath = path.join(dir, file);
         try {
           fs.unlinkSync(filePath);
-          // 使用 console 而非 logger 避免循环依赖
-          console.log(`[Logger] 清理过期日志: ${file}`);
+          // 使用 console.error 而非 console.log 避免污染 stdout（MCP 模式需要纯净的 stdout）
+          console.error(`[Logger] 清理过期日志: ${file}`);
         } catch {
           // 删除失败时静默忽略
         }
@@ -175,10 +175,13 @@ function createDevLogger(): pino.Logger {
       level: logLevel,
       name: "contextweaver",
     },
-    pino.multistream([
-      { stream: logStream, level: logLevel },
-      { stream: consoleStream, level: logLevel },
-    ])
+    // MCP 模式下禁用控制台输出，避免污染 STDIO 协议流
+    isMcpMode
+      ? logStream
+      : pino.multistream([
+        { stream: logStream, level: logLevel },
+        { stream: consoleStream, level: logLevel },
+      ])
   );
 }
 
@@ -200,10 +203,13 @@ function createProdLogger(): pino.Logger {
       level: logLevel,
       name: "contextweaver",
     },
-    pino.multistream([
-      { stream: logStream, level: logLevel },
-      { stream: consoleStream, level: logLevel },
-    ])
+    // MCP 模式下禁用控制台输出，避免污染 STDIO 协议流
+    isMcpMode
+      ? logStream
+      : pino.multistream([
+        { stream: logStream, level: logLevel },
+        { stream: consoleStream, level: logLevel },
+      ])
   );
 }
 
@@ -236,3 +242,4 @@ export const debug = logger.debug.bind(logger);
 export function isDebugEnabled(): boolean {
   return logger.isLevelEnabled("debug");
 }
+

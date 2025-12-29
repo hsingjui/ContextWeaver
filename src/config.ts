@@ -18,6 +18,9 @@ import fs from "fs";
 
 const isDev = process.env.NODE_ENV === "dev";
 
+// MCP 模式检测：通过命令行参数判断（contextweaver mcp）
+export const isMcpMode = process.argv.includes("mcp");
+
 function loadEnv(): void {
     // 可能的 .env 文件路径（按优先级排序）
     const candidates = isDev
