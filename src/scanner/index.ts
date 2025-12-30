@@ -1,25 +1,26 @@
-import { crawl } from "./crawler.js";
-import { processFiles, type ProcessResult } from "./processor.js";
-import { initFilter } from "./filter.js";
+import path from 'path';
+import { getEmbeddingConfig } from '../config.js';
 import {
-  getAllFileMeta,
-  batchUpsert,
-  batchUpdateMtime,
   batchDelete,
-  getAllPaths,
-  generateProjectId,
-  initDb,
-  closeDb,
+  batchUpdateMtime,
+  batchUpsert,
   clear,
+  closeDb,
+  type FileMeta,
+  generateProjectId,
+  getAllFileMeta,
+  getAllPaths,
   getFilesNeedingVectorIndex,
   getStoredEmbeddingDimensions,
+  initDb,
   setStoredEmbeddingDimensions,
-  type FileMeta
-} from "../db/index.js";
-import { getIndexer, closeAllIndexers } from "../indexer/index.js";
-import { closeAllVectorStores } from "../vectorStore/index.js";
-import { getEmbeddingConfig } from "../config.js";
-import { logger } from "../utils/logger.js";
+} from '../db/index.js';
+import { closeAllIndexers, getIndexer } from '../indexer/index.js';
+import { logger } from '../utils/logger.js';
+import { closeAllVectorStores } from '../vectorStore/index.js';
+import { crawl } from './crawler.js';
+import { initFilter } from './filter.js';
+import { type ProcessResult, processFiles } from './processor.js';
 
 /**
  * 扫描结果统计
@@ -75,7 +76,7 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
       if (storedDimensions !== null && storedDimensions !== currentDimensions) {
         logger.warn(
           { stored: storedDimensions, current: currentDimensions },
-          "Embedding 维度变化，强制重新索引"
+          'Embedding 维度变化，强制重新索引',
         );
         forceReindex = true;
       }
@@ -86,7 +87,7 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
 
     // 如果强制重新索引，清空数据库和向量索引
     if (forceReindex) {
-      logger.info("强制重新索引...");
+      logger.info('强制重新索引...');
       clear(db);
 
       // 清空向量索引
@@ -102,7 +103,10 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
 
     // 扫描文件系统
     const filePaths = await crawl(rootPath);
-    const scannedPaths = new Set(filePaths.map(p => p.replace(new RegExp(`^${rootPath}/?`), "")));
+    // 使用 path.relative 确保跨平台兼容，并标准化为 / 分隔符
+    const scannedPaths = new Set(
+      filePaths.map((p) => path.relative(rootPath, p).replace(/\\/g, '/')),
+    );
 
     // 处理文件
     let processedCount = 0;
@@ -126,8 +130,8 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
 
     for (const result of results) {
       switch (result.status) {
-        case "added":
-        case "modified":
+        case 'added':
+        case 'modified':
           toAdd.push({
             path: result.relPath,
             hash: result.hash,
@@ -135,20 +139,20 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
             size: result.size,
             content: result.content,
             language: result.language,
-            vectorIndexHash: null  // 新文件/修改的文件需要重新索引
+            vectorIndexHash: null, // 新文件/修改的文件需要重新索引
           });
           break;
 
-        case "unchanged":
+        case 'unchanged':
           toUpdateMtime.push({ path: result.relPath, mtime: result.mtime });
           break;
 
-        case "skipped":
-          logger.debug({ path: result.relPath, reason: result.error }, "跳过文件");
+        case 'skipped':
+          logger.debug({ path: result.relPath, reason: result.error }, '跳过文件');
           break;
 
-        case "error":
-          logger.error({ path: result.relPath, error: result.error }, "处理文件错误");
+        case 'error':
+          logger.error({ path: result.relPath, error: result.error }, '处理文件错误');
           break;
       }
     }
@@ -156,7 +160,9 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
     // 处理已删除的文件
     const allIndexedPaths = getAllPaths(db);
     for (const indexedPath of allIndexedPaths) {
-      if (!scannedPaths.has(indexedPath)) {
+      // 标准化路径分隔符进行比较
+      const normalizedIndexedPath = indexedPath.replace(/\\/g, '/');
+      if (!scannedPaths.has(normalizedIndexedPath)) {
         deletedPaths.push(indexedPath);
       }
     }
@@ -169,12 +175,12 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
     // 统计结果
     const stats: ScanStats = {
       totalFiles: filePaths.length,
-      added: results.filter(r => r.status === "added").length,
-      modified: results.filter(r => r.status === "modified").length,
-      unchanged: results.filter(r => r.status === "unchanged").length,
+      added: results.filter((r) => r.status === 'added').length,
+      modified: results.filter((r) => r.status === 'modified').length,
+      unchanged: results.filter((r) => r.status === 'unchanged').length,
       deleted: deletedPaths.length,
-      skipped: results.filter(r => r.status === "skipped").length,
-      errors: results.filter(r => r.status === "error").length
+      skipped: results.filter((r) => r.status === 'skipped').length,
+      errors: results.filter((r) => r.status === 'error').length,
     };
 
     // ===== 向量索引 =====
@@ -186,30 +192,30 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
       // 1. 新增/修改的文件
       // 2. 自愈机制：vector_index_hash != hash 的文件
       const needsVectorIndex = results.filter(
-        r => r.status === "added" || r.status === "modified"
+        (r) => r.status === 'added' || r.status === 'modified',
       );
 
       // 自愈：检查 unchanged 文件是否需要补索引
       const healingPathSet = new Set(getFilesNeedingVectorIndex(db));
       const healingFiles = results.filter(
-        r => r.status === "unchanged" && healingPathSet.has(r.relPath)
+        (r) => r.status === 'unchanged' && healingPathSet.has(r.relPath),
       );
 
       if (healingFiles.length > 0) {
-        logger.info({ count: healingFiles.length }, "自愈：发现需要补索引的文件");
+        logger.info({ count: healingFiles.length }, '自愈：发现需要补索引的文件');
       }
 
       // 为 deleted 文件创建占位 ProcessResult
-      const deletedResults: ProcessResult[] = deletedPaths.map(path => ({
-        absPath: "",
+      const deletedResults: ProcessResult[] = deletedPaths.map((path) => ({
+        absPath: '',
         relPath: path,
-        hash: "",
+        hash: '',
         content: null,
         chunks: [],
-        language: "",
+        language: '',
         mtime: 0,
         size: 0,
-        status: "deleted" as const
+        status: 'deleted' as const,
       }));
 
       const allToIndex = [...needsVectorIndex, ...healingFiles, ...deletedResults];
@@ -219,7 +225,7 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
         stats.vectorIndex = {
           indexed: indexStats.indexed,
           deleted: indexStats.deleted,
-          errors: indexStats.errors
+          errors: indexStats.errors,
         };
       }
     }

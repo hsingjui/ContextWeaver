@@ -1,11 +1,16 @@
-import Database from "better-sqlite3";
-import path from "path";
-import os from "os";
-import fs from "fs";
-import crypto from "crypto";
-import { initFilesFts, initChunksFts, batchUpsertFileFts, batchDeleteFileFts } from "../search/fts.js";
+import Database from 'better-sqlite3';
+import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import {
+  batchDeleteFileFts,
+  batchUpsertFileFts,
+  initChunksFts,
+  initFilesFts,
+} from '../search/fts.js';
 
-const BASE_DIR = path.join(os.homedir(), ".contextweaver");
+const BASE_DIR = path.join(os.homedir(), '.contextweaver');
 
 /**
  * 文件元数据接口
@@ -29,7 +34,7 @@ export interface FileMeta {
  */
 function getDirectoryBirthtime(projectPath: string): number {
   // 优先检查 .git 目录（更稳定的仓库标识）
-  const gitDir = path.join(projectPath, ".git");
+  const gitDir = path.join(projectPath, '.git');
   try {
     const gitStats = fs.statSync(gitDir);
     if (gitStats.isDirectory() && gitStats.birthtimeMs) {
@@ -61,7 +66,7 @@ function getDirectoryBirthtime(projectPath: string): number {
 export function generateProjectId(projectPath: string): string {
   const birthtime = getDirectoryBirthtime(projectPath);
   const uniqueKey = `${projectPath}::${birthtime}`;
-  return crypto.createHash("md5").update(uniqueKey).digest("hex").slice(0, 10);
+  return crypto.createHash('md5').update(uniqueKey).digest('hex').slice(0, 10);
 }
 
 /**
@@ -76,9 +81,9 @@ export function initDb(projectId: string): Database.Database {
     fs.mkdirSync(projectDir, { recursive: true });
   }
 
-  const dbPath = path.join(projectDir, "index.db");
+  const dbPath = path.join(projectDir, 'index.db');
   const db = new Database(dbPath);
-  db.pragma("journal_mode = WAL");
+  db.pragma('journal_mode = WAL');
 
   // 创建 files 表
   db.exec(`
@@ -95,7 +100,7 @@ export function initDb(projectId: string): Database.Database {
 
   // 迁移：如果表已存在但缺少 vector_index_hash 列，添加它
   try {
-    db.exec(`ALTER TABLE files ADD COLUMN vector_index_hash TEXT`);
+    db.exec('ALTER TABLE files ADD COLUMN vector_index_hash TEXT');
   } catch {
     // 列已存在，忽略错误
   }
@@ -131,10 +136,18 @@ export function closeDb(db: Database.Database): void {
 /**
  * 获取所有文件元数据
  */
-export function getAllFileMeta(db: Database.Database): Map<string, Pick<FileMeta, "mtime" | "hash" | "size" | "vectorIndexHash">> {
+export function getAllFileMeta(
+  db: Database.Database,
+): Map<string, Pick<FileMeta, 'mtime' | 'hash' | 'size' | 'vectorIndexHash'>> {
   const rows = db
-    .prepare("SELECT path, hash, mtime, size, vector_index_hash FROM files")
-    .all() as Array<{ path: string; hash: string; mtime: number; size: number; vector_index_hash: string | null }>;
+    .prepare('SELECT path, hash, mtime, size, vector_index_hash FROM files')
+    .all() as Array<{
+    path: string;
+    hash: string;
+    mtime: number;
+    size: number;
+    vector_index_hash: string | null;
+  }>;
 
   const map = new Map();
   for (const row of rows) {
@@ -142,7 +155,7 @@ export function getAllFileMeta(db: Database.Database): Map<string, Pick<FileMeta
       mtime: row.mtime,
       hash: row.hash,
       size: row.size,
-      vectorIndexHash: row.vector_index_hash
+      vectorIndexHash: row.vector_index_hash,
     });
   }
   return map;
@@ -154,9 +167,9 @@ export function getAllFileMeta(db: Database.Database): Map<string, Pick<FileMeta
  */
 export function getFilesNeedingVectorIndex(db: Database.Database): string[] {
   const rows = db
-    .prepare("SELECT path FROM files WHERE vector_index_hash IS NULL OR vector_index_hash != hash")
+    .prepare('SELECT path FROM files WHERE vector_index_hash IS NULL OR vector_index_hash != hash')
     .all() as Array<{ path: string }>;
-  return rows.map(r => r.path);
+  return rows.map((r) => r.path);
 }
 
 /**
@@ -165,9 +178,9 @@ export function getFilesNeedingVectorIndex(db: Database.Database): string[] {
  */
 export function batchUpdateVectorIndexHash(
   db: Database.Database,
-  items: Array<{ path: string; hash: string }>
+  items: Array<{ path: string; hash: string }>,
 ): void {
-  const update = db.prepare("UPDATE files SET vector_index_hash = ? WHERE path = ?");
+  const update = db.prepare('UPDATE files SET vector_index_hash = ? WHERE path = ?');
 
   const transaction = db.transaction((data: Array<{ path: string; hash: string }>) => {
     for (const item of data) {
@@ -182,7 +195,7 @@ export function batchUpdateVectorIndexHash(
  * 清除文件的 vector_index_hash（用于标记需要重新索引）
  */
 export function clearVectorIndexHash(db: Database.Database, paths: string[]): void {
-  const update = db.prepare("UPDATE files SET vector_index_hash = NULL WHERE path = ?");
+  const update = db.prepare('UPDATE files SET vector_index_hash = NULL WHERE path = ?');
 
   const transaction = db.transaction((items: string[]) => {
     for (const item of items) {
@@ -235,8 +248,8 @@ export function batchUpsert(db: Database.Database, files: FileMeta[]): void {
 
   // 同步 FTS 索引
   const ftsFiles = files
-    .filter(f => f.content !== null)
-    .map(f => ({ path: f.path, content: f.content! }));
+    .filter((f) => f.content !== null)
+    .map((f) => ({ path: f.path, content: f.content! }));
   if (ftsFiles.length > 0) {
     batchUpsertFileFts(db, ftsFiles);
   }
@@ -245,8 +258,11 @@ export function batchUpsert(db: Database.Database, files: FileMeta[]): void {
 /**
  * 批量更新 mtime
  */
-export function batchUpdateMtime(db: Database.Database, items: Array<{ path: string; mtime: number }>): void {
-  const update = db.prepare("UPDATE files SET mtime = ? WHERE path = ?");
+export function batchUpdateMtime(
+  db: Database.Database,
+  items: Array<{ path: string; mtime: number }>,
+): void {
+  const update = db.prepare('UPDATE files SET mtime = ? WHERE path = ?');
 
   const transaction = db.transaction((data: Array<{ path: string; mtime: number }>) => {
     for (const item of data) {
@@ -261,15 +277,15 @@ export function batchUpdateMtime(db: Database.Database, items: Array<{ path: str
  * 获取所有已索引的文件路径
  */
 export function getAllPaths(db: Database.Database): string[] {
-  const rows = db.prepare("SELECT path FROM files").all() as Array<{ path: string }>;
-  return rows.map(r => r.path);
+  const rows = db.prepare('SELECT path FROM files').all() as Array<{ path: string }>;
+  return rows.map((r) => r.path);
 }
 
 /**
  * 批量删除文件
  */
 export function batchDelete(db: Database.Database, paths: string[]): void {
-  const stmt = db.prepare("DELETE FROM files WHERE path = ?");
+  const stmt = db.prepare('DELETE FROM files WHERE path = ?');
 
   const transaction = db.transaction((items: string[]) => {
     for (const item of items) {
@@ -289,20 +305,22 @@ export function batchDelete(db: Database.Database, paths: string[]): void {
  * 清空数据库
  */
 export function clear(db: Database.Database): void {
-  db.exec("DELETE FROM files");
+  db.exec('DELETE FROM files');
 }
 
 // ===========================================
 // Metadata 操作
 // ===========================================
 
-const METADATA_KEY_EMBEDDING_DIMENSIONS = "embedding_dimensions";
+const METADATA_KEY_EMBEDDING_DIMENSIONS = 'embedding_dimensions';
 
 /**
  * 获取 metadata 值
  */
 export function getMetadata(db: Database.Database, key: string): string | null {
-  const row = db.prepare("SELECT value FROM metadata WHERE key = ?").get(key) as { value: string } | undefined;
+  const row = db.prepare('SELECT value FROM metadata WHERE key = ?').get(key) as
+    | { value: string }
+    | undefined;
   return row?.value ?? null;
 }
 
