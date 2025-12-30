@@ -26,7 +26,7 @@
     "build": "tsup src/index.ts src/mcp/main.ts --format esm --dts --out-dir dist --sourcemap --clean",
     "build:release": "tsup src/index.ts src/mcp/main.ts --format esm --dts --out-dir dist --clean",
     "dev": "tsup src/index.ts src/mcp/main.ts --format esm --dts --out-dir dist --sourcemap --watch",
-    "start": "node dist/index.js"
+    "fmt": "biome check --write ./src"
   },
   "dependencies": {
     "@lancedb/lancedb": "^0.19.1",
@@ -50,8 +50,10 @@
     "zod": "^4.2.1"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.3.10",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.0.3",
+    "knip": "^5.78.0",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3"
   },

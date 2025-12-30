@@ -156,19 +156,20 @@ export class RerankerClient {
         );
 
         return results;
-      } catch (err: any) {
-        const isRateLimited = err.message?.includes('429') || err.message?.includes('rate');
+      } catch (err) {
+        const error = err as { message?: string; stack?: string };
+        const isRateLimited = error.message?.includes('429') || error.message?.includes('rate');
 
         if (attempt < retries) {
           const delay = isRateLimited ? 1000 * attempt : 500 * attempt;
           logger.warn(
-            { attempt, maxRetries: retries, delay, error: err.message },
+            { attempt, maxRetries: retries, delay, error: error.message },
             'Rerank 请求失败，准备重试',
           );
           await sleep(delay);
         } else {
           logger.error(
-            { error: err.message, stack: err.stack, query: query.slice(0, 50) },
+            { error: error.message, stack: error.stack, query: query.slice(0, 50) },
             'Rerank 请求最终失败',
           );
           throw err;
@@ -230,14 +231,6 @@ export function getRerankerClient(): RerankerClient {
   return defaultClient;
 }
 
-/**
- * 重置默认客户端（主要用于测试）
- */
-export function resetRerankerClient(): void {
-  defaultClient = null;
-}
-
-/** 延迟函数 */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

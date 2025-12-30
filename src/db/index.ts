@@ -1,8 +1,8 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import Database from 'better-sqlite3';
-import crypto from 'crypto';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
 import {
   batchDeleteFileFts,
   batchUpsertFileFts,
@@ -207,23 +207,6 @@ export function clearVectorIndexHash(db: Database.Database, paths: string[]): vo
 }
 
 /**
- * 插入或更新文件记录
- */
-export function upsertFile(db: Database.Database, file: FileMeta): void {
-  const stmt = db.prepare(`
-    INSERT INTO files (path, hash, mtime, size, content, language)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(path) DO UPDATE SET
-      hash = excluded.hash,
-      mtime = excluded.mtime,
-      size = excluded.size,
-      content = excluded.content,
-      language = excluded.language
-  `);
-  stmt.run(file.path, file.hash, file.mtime, file.size, file.content, file.language);
-}
-
-/**
  * 批量插入/更新文件记录
  */
 export function batchUpsert(db: Database.Database, files: FileMeta[]): void {
@@ -247,9 +230,13 @@ export function batchUpsert(db: Database.Database, files: FileMeta[]): void {
   transaction(files);
 
   // 同步 FTS 索引
-  const ftsFiles = files
-    .filter((f) => f.content !== null)
-    .map((f) => ({ path: f.path, content: f.content! }));
+  // 使用类型守卫过滤 null，TypeScript 可以正确推断类型
+  const ftsFiles: Array<{ path: string; content: string }> = [];
+  for (const f of files) {
+    if (f.content !== null) {
+      ftsFiles.push({ path: f.path, content: f.content });
+    }
+  }
   if (ftsFiles.length > 0) {
     batchUpsertFileFts(db, ftsFiles);
   }
@@ -317,7 +304,7 @@ const METADATA_KEY_EMBEDDING_DIMENSIONS = 'embedding_dimensions';
 /**
  * 获取 metadata 值
  */
-export function getMetadata(db: Database.Database, key: string): string | null {
+function getMetadata(db: Database.Database, key: string): string | null {
   const row = db.prepare('SELECT value FROM metadata WHERE key = ?').get(key) as
     | { value: string }
     | undefined;
@@ -327,7 +314,7 @@ export function getMetadata(db: Database.Database, key: string): string | null {
 /**
  * 设置 metadata 值
  */
-export function setMetadata(db: Database.Database, key: string, value: string): void {
+function setMetadata(db: Database.Database, key: string, value: string): void {
   db.prepare(`
     INSERT INTO metadata (key, value)
     VALUES (?, ?)
@@ -343,7 +330,7 @@ export function getStoredEmbeddingDimensions(db: Database.Database): number | nu
   const value = getMetadata(db, METADATA_KEY_EMBEDDING_DIMENSIONS);
   if (value === null) return null;
   const parsed = parseInt(value, 10);
-  return isNaN(parsed) ? null : parsed;
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
 /**

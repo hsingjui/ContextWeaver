@@ -2,48 +2,48 @@
  * 文件扩展名到语言标识的映射
  */
 const LANGUAGE_MAP: Record<string, string> = {
-  ".ts": "typescript",
-  ".tsx": "typescript",
-  ".js": "javascript",
-  ".jsx": "javascript",
-  ".mjs": "javascript",
-  ".cjs": "javascript",
-  ".md": "markdown",
-  ".py": "python",
-  ".go": "go",
-  ".rs": "rust",
-  ".java": "java",
-  ".kt": "kotlin",
-  ".swift": "swift",
-  ".cpp": "cpp",
-  ".cc": "cpp",
-  ".cxx": "cpp",
-  ".hpp": "cpp",
-  ".h": "cpp",
-  ".c": "c",
-  ".sh": "shell",
-  ".bash": "shell",
-  ".zsh": "shell",
-  ".fish": "shell",
-  ".ps1": "powershell",
-  ".sql": "sql",
-  ".yaml": "yaml",
-  ".yml": "yaml",
-  ".json": "json",
-  ".toml": "toml",
-  ".xml": "xml",
-  ".html": "html",
-  ".css": "css",
-  ".scss": "scss",
-  ".sass": "sass",
-  ".less": "less",
-  ".vue": "vue",
-  ".svelte": "svelte",
-  ".rb": "ruby",
-  ".php": "php",
-  ".dart": "dart",
-  ".lua": "lua",
-  ".r": "r",
+  '.ts': 'typescript',
+  '.tsx': 'typescript',
+  '.js': 'javascript',
+  '.jsx': 'javascript',
+  '.mjs': 'javascript',
+  '.cjs': 'javascript',
+  '.md': 'markdown',
+  '.py': 'python',
+  '.go': 'go',
+  '.rs': 'rust',
+  '.java': 'java',
+  '.kt': 'kotlin',
+  '.swift': 'swift',
+  '.cpp': 'cpp',
+  '.cc': 'cpp',
+  '.cxx': 'cpp',
+  '.hpp': 'cpp',
+  '.h': 'cpp',
+  '.c': 'c',
+  '.sh': 'shell',
+  '.bash': 'shell',
+  '.zsh': 'shell',
+  '.fish': 'shell',
+  '.ps1': 'powershell',
+  '.sql': 'sql',
+  '.yaml': 'yaml',
+  '.yml': 'yaml',
+  '.json': 'json',
+  '.toml': 'toml',
+  '.xml': 'xml',
+  '.html': 'html',
+  '.css': 'css',
+  '.scss': 'scss',
+  '.sass': 'sass',
+  '.less': 'less',
+  '.vue': 'vue',
+  '.svelte': 'svelte',
+  '.rb': 'ruby',
+  '.php': 'php',
+  '.dart': 'dart',
+  '.lua': 'lua',
+  '.r': 'r',
 };
 
 /**
@@ -58,7 +58,7 @@ const ALLOWED_EXTENSIONS = new Set(Object.keys(LANGUAGE_MAP));
  */
 export function getLanguage(filePath: string): string {
   const ext = getFileExtension(filePath);
-  return LANGUAGE_MAP[ext] || "unknown";
+  return LANGUAGE_MAP[ext] || 'unknown';
 }
 
 /**
@@ -77,8 +77,6 @@ export function isAllowedExtension(filePath: string): boolean {
  * @returns 扩展名，如 ".ts"
  */
 function getFileExtension(filePath: string): string {
-  const ext = filePath.split(".").pop();
-  return ext ? `.${ext.toLowerCase()}` : "";
+  const ext = filePath.split('.').pop();
+  return ext ? `.${ext.toLowerCase()}` : '';
 }
-
-export { LANGUAGE_MAP, ALLOWED_EXTENSIONS };

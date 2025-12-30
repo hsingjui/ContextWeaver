@@ -1,45 +1,36 @@
-import ignore from "ignore";
-import fs from "fs/promises";
-import path from "path";
-import { getExcludePatterns } from "../config.js";
-import { isAllowedExtension } from "./language.js";
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import ignore from 'ignore';
+import { getExcludePatterns } from '../config.js';
+import { isAllowedExtension } from './language.js';
 
 let ignoreInstance: ignore.Ignore | null = null;
 let lastConfigHash: string | null = null;
 
 /**
- * 配置文件路径
- */
-const CONFIG_FILES = [
-  ".gitignore",
-  ".contextweaverignore"
-];
-
-/**
  * 生成配置文件内容的 hash
  */
 async function generateConfigHash(rootPath: string): Promise<string> {
-  const crypto = await import("crypto");
+  const crypto = await import('node:crypto');
   const hashes: string[] = [];
 
-  for (const file of CONFIG_FILES) {
-    const filePath = path.join(rootPath, file);
-    try {
-      const content = await fs.readFile(filePath, "utf-8");
-      hashes.push(crypto.createHash("sha256").update(content).digest("hex"));
-    } catch {
-      // 文件不存在，跳过
-    }
+  // 只读取 .gitignore
+  const gitignorePath = path.join(rootPath, '.gitignore');
+  try {
+    const content = await fs.readFile(gitignorePath, 'utf-8');
+    hashes.push(crypto.createHash('sha256').update(content).digest('hex'));
+  } catch {
+    // 文件不存在，跳过
   }
 
   // 加上环境变量 IGNORE_PATTERNS
-  const envPatterns = process.env.IGNORE_PATTERNS || "";
-  const envHash = crypto.createHash("sha256").update(envPatterns).digest("hex");
+  const envPatterns = process.env.IGNORE_PATTERNS || '';
+  const envHash = crypto.createHash('sha256').update(envPatterns).digest('hex');
   hashes.push(envHash);
 
   // 合并所有 hashes
-  const combined = hashes.join("|");
-  return crypto.createHash("sha256").update(combined).digest("hex");
+  const combined = hashes.join('|');
+  return crypto.createHash('sha256').update(combined).digest('hex');
 }
 
 /**
@@ -57,19 +48,12 @@ export async function initFilter(rootPath: string): Promise<void> {
   ig.add(patterns);
 
   // 加载 .gitignore
-  const gitignorePath = path.join(rootPath, ".gitignore");
+  const gitignorePath = path.join(rootPath, '.gitignore');
   try {
     await fs.access(gitignorePath);
-    ig.add(await fs.readFile(gitignorePath, "utf-8"));
+    ig.add(await fs.readFile(gitignorePath, 'utf-8'));
   } catch {
-  }
-
-  // 加载 .contextweaverignore
-  const cwignorePath = path.join(rootPath, ".contextweaverignore");
-  try {
-    await fs.access(cwignorePath);
-    ig.add(await fs.readFile(cwignorePath, "utf-8"));
-  } catch {
+    // 文件不存在，静默跳过
   }
 
   ignoreInstance = ig;
@@ -81,7 +65,7 @@ export async function initFilter(rootPath: string): Promise<void> {
  */
 export function isFiltered(relativePath: string): boolean {
   if (!ignoreInstance) {
-    throw new Error("Filter not initialized. Call initFilter() first.");
+    throw new Error('Filter not initialized. Call initFilter() first.');
   }
   return ignoreInstance.ignores(relativePath);
 }

@@ -1,46 +1,39 @@
-import fs from "fs/promises";
-import pLimit from "p-limit";
-import path from "path";
-import os from "os";
-import { sha256 } from "./hash.js";
-import { getLanguage } from "./language.js";
-import { readFileWithEncoding } from "../utils/encoding.js";
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import pLimit from 'p-limit';
 import {
-  SemanticSplitter,
   getParser,
   isLanguageSupported,
   type ProcessedChunk,
-} from "../chunking/index.js";
+  SemanticSplitter,
+} from '../chunking/index.js';
+import { readFileWithEncoding } from '../utils/encoding.js';
+import { sha256 } from './hash.js';
+import { getLanguage } from './language.js';
 
 /**
  * 大文件阈值（字节）
  */
-const MAX_FILE_SIZE = 500 * 1024; // 500KB
+const MAX_FILE_SIZE = 100 * 1024; // 500KB
 
 /**
  * 需要兜底分片支持的目标语言集合
  * 这些语言的文件即使 AST 解析失败也会使用行分片保证可检索
  */
-export const FALLBACK_LANGS = new Set([
-  "python",
-  "go",
-  "rust",
-  "java",
-  "markdown",
-  "json"
-]);
+const FALLBACK_LANGS = new Set(['python', 'go', 'rust', 'java', 'markdown', 'json']);
 
 /**
  * 检查 JSON 文件是否应该跳过索引
- * 
+ *
  * 跳过条件：
  * 1. lock 文件（*-lock.json, package-lock.json）
  * 2. node_modules 目录下的文件
- * 
+ *
  * @param relPath 相对路径
  * @returns 是否应该跳过
  */
-export function shouldSkipJson(relPath: string): boolean {
+function shouldSkipJson(relPath: string): boolean {
   // Skip lock files
   if (relPath.endsWith('-lock.json') || relPath.endsWith('package-lock.json')) {
     return true;
@@ -61,9 +54,9 @@ export function shouldSkipJson(relPath: string): boolean {
  * - 最大并发度为 32（避免过多上下文切换开销）
  */
 function getAdaptiveConcurrency(): number {
-    const cpuCount = os.cpus().length;
-    const concurrency = Math.max(4, Math.min(cpuCount - 1, 32));
-    return concurrency;
+  const cpuCount = os.cpus().length;
+  const concurrency = Math.max(4, Math.min(cpuCount - 1, 32));
+  return concurrency;
 }
 
 /**
@@ -72,7 +65,7 @@ function getAdaptiveConcurrency(): number {
 const splitter = new SemanticSplitter({
   maxChunkSize: 500,
   minChunkSize: 50,
-  chunkOverlap: 40,  // 混合检索(BM25+向量+rerank)下的保守 overlap
+  chunkOverlap: 40, // 混合检索(BM25+向量+rerank)下的保守 overlap
 });
 
 /**
@@ -87,16 +80,8 @@ export interface ProcessResult {
   language: string;
   mtime: number;
   size: number;
-  status: "added" | "modified" | "unchanged" | "deleted" | "skipped" | "error";
+  status: 'added' | 'modified' | 'unchanged' | 'deleted' | 'skipped' | 'error';
   error?: string;
-}
-
-/**
- * 文件处理选项
- */
-export interface ProcessOptions {
-  skipUnchanged?: boolean;
-  concurrency?: number;
 }
 
 /**
@@ -114,7 +99,7 @@ export interface KnownFileMeta {
 async function processFile(
   absPath: string,
   relPath: string,
-  known?: KnownFileMeta
+  known?: KnownFileMeta,
 ): Promise<ProcessResult> {
   const language = getLanguage(relPath);
 
@@ -128,14 +113,14 @@ async function processFile(
       return {
         absPath,
         relPath,
-        hash: "",
+        hash: '',
         content: null,
         chunks: [],
         language,
         mtime,
         size,
-        status: "skipped",
-        error: `File too large (${size} bytes > ${MAX_FILE_SIZE} bytes)`
+        status: 'skipped',
+        error: `File too large (${size} bytes > ${MAX_FILE_SIZE} bytes)`,
       };
     }
 
@@ -150,7 +135,7 @@ async function processFile(
         language,
         mtime,
         size,
-        status: "unchanged"
+        status: 'unchanged',
       };
     }
 
@@ -158,18 +143,18 @@ async function processFile(
     const { content, originalEncoding } = await readFileWithEncoding(absPath);
 
     // 二进制检测：检查 NULL 字节
-    if (content.includes("\0")) {
+    if (content.includes('\0')) {
       return {
         absPath,
         relPath,
-        hash: "",
+        hash: '',
         content: null,
         chunks: [],
         language,
         mtime,
         size,
-        status: "skipped",
-        error: `Binary file detected (original encoding: ${originalEncoding})`
+        status: 'skipped',
+        error: `Binary file detected (original encoding: ${originalEncoding})`,
       };
     }
 
@@ -187,12 +172,12 @@ async function processFile(
         language,
         mtime,
         size,
-        status: "unchanged"
+        status: 'unchanged',
       };
     }
 
     // ===== JSON 文件特殊处理 =====
-    if (language === "json" && shouldSkipJson(relPath)) {
+    if (language === 'json' && shouldSkipJson(relPath)) {
       return {
         absPath,
         relPath,
@@ -202,8 +187,8 @@ async function processFile(
         language,
         mtime,
         size,
-        status: "skipped",
-        error: "Lock file or node_modules JSON"
+        status: 'skipped',
+        error: 'Lock file or node_modules JSON',
       };
     }
 
@@ -218,9 +203,10 @@ async function processFile(
           const tree = parser.parse(content);
           chunks = splitter.split(tree, content, relPath, language);
         }
-      } catch (err: any) {
+      } catch (err) {
+        const error = err as { message?: string };
         // AST 分片失败，记录警告
-        console.warn(`[Chunking] AST failed for ${relPath}: ${err.message}`);
+        console.warn(`[Chunking] AST failed for ${relPath}: ${error.message}`);
       }
     }
 
@@ -238,20 +224,21 @@ async function processFile(
       language,
       mtime,
       size,
-      status: known ? "modified" : "added"
+      status: known ? 'modified' : 'added',
     };
-  } catch (err: any) {
+  } catch (err) {
+    const error = err as { message?: string };
     return {
       absPath,
       relPath,
-      hash: "",
+      hash: '',
       content: null,
       chunks: [],
       language,
       mtime: 0,
       size: 0,
-      status: "error",
-      error: err.message
+      status: 'error',
+      error: error.message,
     };
   }
 }
@@ -262,13 +249,14 @@ async function processFile(
 export async function processFiles(
   rootPath: string,
   filePaths: string[],
-  knownFiles: Map<string, KnownFileMeta>
+  knownFiles: Map<string, KnownFileMeta>,
 ): Promise<ProcessResult[]> {
   const concurrency = getAdaptiveConcurrency();
   const limit = pLimit(concurrency);
 
-  const tasks = filePaths.map(filePath => {
-    const relPath = path.relative(rootPath, filePath);
+  const tasks = filePaths.map((filePath) => {
+    // 标准化路径分隔符为 /，确保跨平台一致性
+    const relPath = path.relative(rootPath, filePath).replace(/\\/g, '/');
     const known = knownFiles.get(relPath);
     return limit(() => processFile(filePath, relPath, known));
   });

@@ -1,5 +1,4 @@
 import { fdir } from 'fdir';
-import path from 'path';
 import { isAllowedFile, isFiltered } from './filter.js';
 
 /**

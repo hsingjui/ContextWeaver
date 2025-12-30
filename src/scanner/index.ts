@@ -1,4 +1,4 @@
-import path from 'path';
+import path from 'node:path';
 import { getEmbeddingConfig } from '../config.js';
 import {
   batchDelete,

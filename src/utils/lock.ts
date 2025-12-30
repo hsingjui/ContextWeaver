@@ -4,9 +4,9 @@
  * 用于防止多个进程同时操作同一个项目的索引
  */
 
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { logger } from './logger.js';
 
 const BASE_DIR = path.join(os.homedir(), '.contextweaver');
@@ -57,8 +57,9 @@ function isLockValid(lockPath: string): boolean {
       logger.warn({ pid: lockInfo.pid }, '持有锁的进程已死亡');
       return false;
     }
-  } catch (err: any) {
-    logger.debug({ error: err.message }, '读取锁文件失败');
+  } catch (err) {
+    const error = err as { message?: string };
+    logger.debug({ error: error.message }, '读取锁文件失败');
     return false;
   }
 }
@@ -71,7 +72,7 @@ function isLockValid(lockPath: string): boolean {
  * @param timeoutMs 等待超时时间，默认 30 秒
  * @returns 是否成功获取锁
  */
-export async function acquireLock(
+async function acquireLock(
   projectId: string,
   operation: string,
   timeoutMs: number = 30000,
@@ -107,9 +108,10 @@ export async function acquireLock(
           logger.debug({ projectId: projectId.slice(0, 10), operation }, '获取锁成功');
           return true;
         }
-      } catch (err: any) {
+      } catch (err) {
+        const error = err as { message?: string };
         // 写入失败，可能被其他进程抢占
-        logger.debug({ error: err.message }, '获取锁失败，重试中...');
+        logger.debug({ error: error.message }, '获取锁失败，重试中...');
       }
     } else {
       logger.debug({ projectId: projectId.slice(0, 10) }, '等待锁释放...');
@@ -128,7 +130,7 @@ export async function acquireLock(
  *
  * @param projectId 项目 ID
  */
-export function releaseLock(projectId: string): void {
+function releaseLock(projectId: string): void {
   const lockPath = getLockFilePath(projectId);
 
   try {
@@ -146,8 +148,9 @@ export function releaseLock(projectId: string): void {
     } else {
       logger.warn({ ownPid: process.pid, lockPid: lockInfo.pid }, '尝试释放非自己持有的锁');
     }
-  } catch (err: any) {
-    logger.debug({ error: err.message }, '释放锁时出错');
+  } catch (err) {
+    const error = err as { message?: string };
+    logger.debug({ error: error.message }, '释放锁时出错');
   }
 }
 

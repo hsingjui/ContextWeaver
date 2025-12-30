@@ -241,7 +241,7 @@ class RateLimitController {
     );
 
     // 创建暂停 Promise
-    let resumeResolve: () => void;
+    let resumeResolve: () => void = () => {};
     this.pausePromise = new Promise<void>((resolve) => {
       resumeResolve = resolve;
     });
@@ -254,9 +254,8 @@ class RateLimitController {
 
     // 恢复
     this.isPaused = false;
-    const resolvedPromise = this.pausePromise;
     this.pausePromise = null;
-    resumeResolve!();
+    resumeResolve();
 
     logger.info({ waitMs: this.backoffMs }, '速率限制：恢复请求');
   }
@@ -369,8 +368,9 @@ export class EmbeddingClient {
         const result = await this.processBatch(texts, startIndex, progress);
         this.rateLimiter.releaseSuccess();
         return result;
-      } catch (err: any) {
-        const errorMessage = err.message || '';
+      } catch (err) {
+        const error = err as { message?: string; code?: string };
+        const errorMessage = error.message || '';
         const isRateLimited = errorMessage.includes('429') || errorMessage.includes('rate');
         const isNetworkError = this.isNetworkError(err);
 
@@ -423,9 +423,10 @@ export class EmbeddingClient {
    * - fetch failed: 通用 fetch 失败
    * - socket hang up: 套接字意外关闭
    */
-  private isNetworkError(err: any): boolean {
-    const message = (err.message || '').toLowerCase();
-    const code = err.code || '';
+  private isNetworkError(err: unknown): boolean {
+    const error = err as { message?: string; code?: string };
+    const message = (error.message || '').toLowerCase();
+    const code = error.code || '';
 
     const networkErrorPatterns = [
       'terminated',
@@ -524,15 +525,6 @@ export function getEmbeddingClient(): EmbeddingClient {
   return defaultClient;
 }
 
-/**
- * 重置默认客户端（主要用于测试）
- */
-export function resetEmbeddingClient(): void {
-  defaultClient = null;
-  globalRateLimitController = null;
-}
-
-/** 延迟函数 */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
