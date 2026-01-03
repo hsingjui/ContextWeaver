@@ -45,15 +45,34 @@ npm link  # 可选：创建全局链接
 
 根据项目需要配置对应语言的语法包：
 
-| 语言 | 下载地址 | 目标位置 |
+### 语法包清单
+
+| 语言 | 常见文件名 | 目标目录 |
 |---|---|---|
-| TypeScript | [ Releases](https://github.com/tree-sitter/tree-sitter-typescript/releases) | `node_modules/tree-sitter-typescript/build/Release/` |
-| JavaScript | [ Releases](https://github.com/tree-sitter/tree-sitter-javascript/releases) | `node_modules/tree-sitter-javascript/build/Release/` |
-| Python | [ Releases](https://github.com/tree-sitter/tree-sitter-python/releases) | `node_modules/tree-sitter-python/build/Release/` |
-| Go | [ Releases](https://github.com/tree-sitter/tree-sitter-go/releases) | `node_modules/tree-sitter-go/build/Release/` |
-| Java | [ Releases](https://github.com/tree-sitter/tree-sitter-java/releases) | `node_modules/tree-sitter-java/build/Release/` |
-| C++ | [ Releases](https://github.com/tree-sitter/tree-sitter-cpp/releases) | `node_modules/tree-sitter-cpp/build/Release/` |
-| Rust | [ Releases](https://github.com/tree-sitter/tree-sitter-rust/releases) | `node_modules/tree-sitter-rust/build/Release/` |
+| TypeScript | `typescript.node` | `node_modules/tree-sitter-typescript/build/Release/` |
+| JavaScript | `javascript.node` | `node_modules/tree-sitter-javascript/build/Release/` |
+| Python | `tree_sitter_python_binding.node` | `node_modules/tree-sitter-python/build/Release/` |
+| Go | `parser.node` 或 `go.node` | `node_modules/tree-sitter-go/build/Release/` |
+| Java | `java.node` | `node_modules/tree-sitter-java/build/Release/` |
+| C++ | `cpp.node` | `node_modules/tree-sitter-cpp/build/Release/` |
+| Rust | `rust.node` | `node_modules/tree-sitter-rust/build/Release/` |
+
+### 配置示例（以 Python 为例）
+
+```bash
+# 1. 下载语法包
+# 访问：https://github.com/tree-sitter/tree-sitter-python/releases
+# 下载对应 Node.js 版本的 .node 文件
+
+# 2. 创建目标目录
+mkdir -p node_modules/tree-sitter-python/build/Release
+
+# 3. 复制文件（文件名可能不同，以下载的为准）
+cp /path/to/tree_sitter_python_binding.node node_modules/tree-sitter-python/build/Release/
+
+# 4. 重新构建
+npm run build
+```
 
 > **提示**：未配置语法包的语言会自动使用基于行的分块方式，功能正常。
 
