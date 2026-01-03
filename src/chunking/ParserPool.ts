@@ -15,6 +15,9 @@ const GRAMMAR_MODULES: Record<string, string> = {
   go: 'tree-sitter-go',
   rust: 'tree-sitter-rust',
   java: 'tree-sitter-java',
+  c: 'tree-sitter-c',
+  cpp: 'tree-sitter-cpp',
+  cxx: 'tree-sitter-cpp',
 };
 
 // 缓存已加载的语法

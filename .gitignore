@@ -5,3 +5,8 @@ dist
 .env
 .claude
 .ace-tool/
+package-lock.json
+# 下载的语法包源码
+*.tar.gz
+*.tar.xz
+tree-sitter-*.tar.*
