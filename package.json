@@ -41,6 +41,8 @@
     "p-limit": "^7.2.0",
     "pino": "^10.1.0",
     "tree-sitter": "0.20.6",
+    "tree-sitter-c": "^0.20.8",
+    "tree-sitter-cpp": "^0.20.5",
     "tree-sitter-go": "0.20.0",
     "tree-sitter-java": "0.20.2",
     "tree-sitter-javascript": "0.20.4",
@@ -60,14 +62,7 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "better-sqlite3",
-      "esbuild",
-      "tree-sitter",
-      "tree-sitter-go",
-      "tree-sitter-java",
-      "tree-sitter-javascript",
-      "tree-sitter-python",
-      "tree-sitter-rust",
-      "tree-sitter-typescript"
+      "esbuild"
     ]
   }
 }

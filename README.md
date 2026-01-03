@@ -24,7 +24,7 @@
 - **RRF 融合 (Reciprocal Rank Fusion)**：智能融合多路召回结果
 
 ### 🧠 AST 语义分片
-- **Tree-sitter 解析**：支持 TypeScript、JavaScript、Python、Go、Java、Rust 六大语言
+- **Tree-sitter 解析**：支持 TypeScript、JavaScript、Python、Go、Java、Rust、C/C++ 八大语言
 - **Dual-Text 策略**：`displayCode` 用于展示，`vectorText` 用于 Embedding
 - **Gap-Aware 合并**：智能处理代码间隙，保持语义完整性
 - **Breadcrumb 注入**：向量文本包含层级路径，提升检索召回率
@@ -60,6 +60,8 @@ npm install -g @hsingjui/contextweaver
 # 或使用 pnpm
 pnpm add -g @hsingjui/contextweaver
 ```
+
+> **🪟 Windows 用户**：如果遇到编译错误，请参考 [Windows 安装指南](docs/WINDOWS_INSTALL.md)
 
 ### 初始化配置
 
@@ -319,8 +321,10 @@ ContextWeaver 通过 Tree-sitter 原生支持以下编程语言的 AST 解析：
 | Go | ✅ | ✅ | `.go` |
 | Java | ✅ | ✅ | `.java` |
 | Rust | ✅ | ✅ | `.rs` |
+| C | ✅ | ❌ | `.c`, `.h` |
+| C++ | ✅ | ❌ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx` |
 
-其他语言会采用基于行的 Fallback 分片策略，仍可正常索引和搜索。
+> **💡 未配置语法包？** ContextWeaver 会自动使用基于行的 Fallback 分片策略，功能正常。[Windows 用户点击这里](docs/WINDOWS_INSTALL.md#可选配置语法包)查看如何配置语法包。
 
 ## 🔄 工作流程
 
