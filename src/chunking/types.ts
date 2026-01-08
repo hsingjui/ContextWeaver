@@ -1,4 +1,4 @@
-import type Parser from 'tree-sitter';
+import type Parser from '@keqingmoe/tree-sitter';
 
 // ==========================================
 // 分片元数据：用于后续的过滤和定位

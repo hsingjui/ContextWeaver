@@ -5,7 +5,7 @@
  * 支持动态加载语言语法包。
  *
  */
-import Parser from 'tree-sitter';
+import Parser from '@keqingmoe/tree-sitter';
 
 // 语言到语法模块的映射
 const GRAMMAR_MODULES: Record<string, string> = {

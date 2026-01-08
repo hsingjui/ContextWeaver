@@ -7,7 +7,7 @@
  * 3. Split-then-Merge - 先递归拆解大块，再滑动窗口合并小块
  * 4. SourceAdapter - 统一索引域适配（UTF-16/UTF-8）
  */
-import type Parser from 'tree-sitter';
+import type Parser from '@keqingmoe/tree-sitter';
 import { getLanguageSpec, type LanguageSpecConfig } from './LanguageSpec.js';
 import { SourceAdapter } from './SourceAdapter.js';
 import type { ChunkMetadata, ProcessedChunk, SplitterConfig, Window } from './types.js';
