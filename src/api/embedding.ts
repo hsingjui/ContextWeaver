@@ -329,12 +329,12 @@ export class EmbeddingClient {
   /**
    * 批量获取 Embedding
    * @param texts 待处理的文本数组
-   * @param batchSize 每批次发送的文本数量（默认 20）
+   * @param batchSize 每批次发送的文本数量（默认使用配置项 EMBEDDINGS_BATCH_SIZE）
    * @param onProgress 可选的进度回调 (completed, total) => void
    */
   async embedBatch(
     texts: string[],
-    batchSize = 20,
+    batchSize = this.config.batchSize,
     onProgress?: (completed: number, total: number) => void,
   ): Promise<EmbeddingResult[]> {
     if (texts.length === 0) {
