@@ -78,6 +78,7 @@ EMBEDDINGS_API_KEY=your-api-key-here
 EMBEDDINGS_BASE_URL=https://api.siliconflow.cn/v1/embeddings
 EMBEDDINGS_MODEL=BAAI/bge-m3
 EMBEDDINGS_MAX_CONCURRENCY=10
+EMBEDDINGS_BATCH_SIZE=10
 EMBEDDINGS_DIMENSIONS=1024
 
 # Reranker 配置（必需）
@@ -264,6 +265,7 @@ contextweaver/
 | `EMBEDDINGS_BASE_URL` | ✅ | - | Embedding API 地址 |
 | `EMBEDDINGS_MODEL` | ✅ | - | Embedding 模型名称 |
 | `EMBEDDINGS_MAX_CONCURRENCY` | ❌ | 10 | Embedding 并发数 |
+| `EMBEDDINGS_BATCH_SIZE` | ❌ | 10 | Embedding 单请求批次大小（input 条数） |
 | `EMBEDDINGS_DIMENSIONS` | ❌ | 1024 | 向量维度 |
 | `RERANK_API_KEY` | ✅ | - | Reranker API 密钥 |
 | `RERANK_BASE_URL` | ✅ | - | Reranker API 地址 |

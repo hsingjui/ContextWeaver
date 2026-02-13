@@ -203,12 +203,16 @@ export class Indexer {
     }
 
     // ===== 阶段 2: 批量获取 embeddings =====
-    logger.info({ count: allTexts.length, files: files.length }, '开始批量 Embedding');
+    const embeddingBatchSize = this.embeddingClient.getConfig().batchSize;
+    logger.info(
+      { count: allTexts.length, files: files.length, batchSize: embeddingBatchSize },
+      '开始批量 Embedding',
+    );
 
     let embeddings: number[][];
     try {
       // 传递进度回调给 embedBatch，让它在每个 API 批次完成时报告进度
-      const results = await this.embeddingClient.embedBatch(allTexts, 20, onProgress);
+      const results = await this.embeddingClient.embedBatch(allTexts, embeddingBatchSize, onProgress);
       embeddings = results.map((r) => r.embedding);
     } catch (err) {
       const error = err as { message?: string; stack?: string };
