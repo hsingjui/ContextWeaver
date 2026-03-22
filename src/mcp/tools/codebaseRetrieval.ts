@@ -8,9 +8,11 @@
  * - 回归代理本能：工具只负责定位，跨文件探索由 Agent 自主发起
  */
 
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { generateProjectId } from '../../db/index.js';
 // 注意：SearchService 和 scan 改为延迟导入，避免在 MCP 启动时就加载 native 模块
@@ -46,6 +48,8 @@ export type CodebaseRetrievalInput = z.infer<typeof codebaseRetrievalSchema>;
 
 const BASE_DIR = path.join(os.homedir(), '.contextweaver');
 const INDEX_LOCK_TIMEOUT_MS = 10 * 60 * 1000;
+const BACKGROUND_INDEX_COOLDOWN_MS = 60 * 1000;
+const backgroundIndexStartedAt = new Map<string, number>();
 
 /**
  * 确保默认 .env 文件存在
@@ -100,6 +104,54 @@ function isProjectIndexed(projectId: string): boolean {
 }
 
 /**
+ * 后台索引预约文件路径
+ */
+function getBackgroundIndexRequestPath(projectId: string): string {
+  return path.join(BASE_DIR, projectId, 'background-index.request');
+}
+
+/**
+ * 预约后台索引任务，避免多个 MCP 进程反复拉起子进程
+ */
+function claimBackgroundIndexRequest(projectId: string): string | null {
+  const requestPath = getBackgroundIndexRequestPath(projectId);
+  const dir = path.dirname(requestPath);
+
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  try {
+    const content = fs.readFileSync(requestPath, 'utf-8');
+    const requestInfo = JSON.parse(content) as { pid: number; timestamp: number };
+    if (Date.now() - requestInfo.timestamp < BACKGROUND_INDEX_COOLDOWN_MS) {
+      return null;
+    }
+  } catch {
+    // 文件不存在或损坏时，继续重建预约文件
+  }
+
+  try {
+    fs.unlinkSync(requestPath);
+  } catch {
+    // 允许文件不存在
+  }
+
+  try {
+    fs.writeFileSync(requestPath, JSON.stringify({ pid: process.pid, timestamp: Date.now() }), {
+      flag: 'wx',
+    });
+    return requestPath;
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException;
+    if (error.code !== 'EEXIST') {
+      logger.debug({ error: error.message }, '创建后台索引请求标记失败');
+    }
+    return null;
+  }
+}
+
+/**
  * 确保代码库已索引
  *
  * 策略：
@@ -120,37 +172,97 @@ async function ensureIndexed(
   const { withLock } = await import('../../utils/lock.js');
   const { scan } = await import('../../scanner/index.js');
 
-  await withLock(projectId, 'index', async () => {
-    const wasIndexed = isProjectIndexed(projectId);
+  await withLock(
+    projectId,
+    'index',
+    async () => {
+      const wasIndexed = isProjectIndexed(projectId);
 
-    if (!wasIndexed) {
+      if (!wasIndexed) {
+        logger.info(
+          { repoPath, projectId: projectId.slice(0, 10) },
+          '代码库未初始化，开始首次索引...',
+        );
+        onProgress?.(0, 100, '代码库未索引，开始首次索引...');
+      } else {
+        logger.debug({ projectId: projectId.slice(0, 10) }, '执行增量索引...');
+      }
+
+      const startTime = Date.now();
+      const stats = await scan(repoPath, { vectorIndex: true, onProgress });
+      const elapsed = Date.now() - startTime;
+
       logger.info(
-        { repoPath, projectId: projectId.slice(0, 10) },
-        '代码库未初始化，开始首次索引...',
+        {
+          projectId: projectId.slice(0, 10),
+          isFirstTime: !wasIndexed,
+          totalFiles: stats.totalFiles,
+          added: stats.added,
+          modified: stats.modified,
+          deleted: stats.deleted,
+          vectorIndex: stats.vectorIndex,
+          elapsedMs: elapsed,
+        },
+        '索引完成',
       );
-      onProgress?.(0, 100, '代码库未索引，开始首次索引...');
-    } else {
-      logger.debug({ projectId: projectId.slice(0, 10) }, '执行增量索引...');
-    }
+    },
+    INDEX_LOCK_TIMEOUT_MS,
+  );
+}
 
-    const startTime = Date.now();
-    const stats = await scan(repoPath, { vectorIndex: true, onProgress });
-    const elapsed = Date.now() - startTime;
+/**
+ * 后台启动增量索引
+ */
+async function scheduleBackgroundIndex(repoPath: string, projectId: string): Promise<void> {
+  const lastStartedAt = backgroundIndexStartedAt.get(projectId) ?? 0;
+  if (Date.now() - lastStartedAt < BACKGROUND_INDEX_COOLDOWN_MS) {
+    return;
+  }
 
+  const { isProjectLocked } = await import('../../utils/lock.js');
+  if (isProjectLocked(projectId)) {
+    logger.debug({ projectId: projectId.slice(0, 10) }, '后台索引已在进行中，跳过重复调度');
+    return;
+  }
+
+  const requestPath = claimBackgroundIndexRequest(projectId);
+  if (!requestPath) {
+    logger.debug({ projectId: projectId.slice(0, 10) }, '后台索引请求已被其他进程预约');
+    return;
+  }
+
+  backgroundIndexStartedAt.set(projectId, Date.now());
+
+  try {
+    const cliEntry = fileURLToPath(new URL('./index.js', import.meta.url));
+    const child = spawn(process.execPath, [cliEntry, 'index', repoPath], {
+      detached: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        CW_BACKGROUND_INDEX: '1',
+        CW_INDEX_LOCK_TIMEOUT_MS: '500',
+        CW_BACKGROUND_INDEX_MARKER_PATH: requestPath,
+      },
+    });
+
+    child.unref();
     logger.info(
       {
         projectId: projectId.slice(0, 10),
-        isFirstTime: !wasIndexed,
-        totalFiles: stats.totalFiles,
-        added: stats.added,
-        modified: stats.modified,
-        deleted: stats.deleted,
-        vectorIndex: stats.vectorIndex,
-        elapsedMs: elapsed,
+        pid: child.pid,
       },
-      '索引完成',
+      '已启动后台增量索引',
     );
-  }, INDEX_LOCK_TIMEOUT_MS);
+  } catch (err) {
+    try {
+      fs.unlinkSync(requestPath);
+    } catch {
+      // 忽略清理失败
+    }
+
+    throw err;
+  }
 }
 
 // 工具处理函数
@@ -195,8 +307,16 @@ export async function handleCodebaseRetrieval(
   // 1. 生成项目 ID（与 CLI 保持一致：路径 + 目录创建时间）
   const projectId = generateProjectId(repo_path);
 
-  // 2. 确保代码库已索引（自动初始化 + 增量更新）
-  await ensureIndexed(repo_path, projectId, onProgress);
+  // 2. 首次使用时同步建索引；已有索引时优先查询旧索引并异步增量更新
+  if (!isProjectIndexed(projectId)) {
+    await ensureIndexed(repo_path, projectId, onProgress);
+  } else {
+    logger.debug({ projectId: projectId.slice(0, 10) }, '命中已有索引，跳过同步增量索引');
+    void scheduleBackgroundIndex(repo_path, projectId).catch((err) => {
+      const error = err as { message?: string };
+      logger.warn({ projectId: projectId.slice(0, 10), error: error.message }, '启动后台索引失败');
+    });
+  }
 
   // 3. 合并查询
   // - information_request 驱动语义向量搜索
@@ -216,63 +336,67 @@ export async function handleCodebaseRetrieval(
 
   // 5. 创建 SearchService 实例
   const service = new SearchService(projectId, repo_path);
-  await service.init();
-  logger.debug('SearchService 初始化完成');
+  try {
+    await service.init();
+    logger.debug('SearchService 初始化完成');
 
-  // 6. 执行搜索
-  const contextPack = await service.buildContextPack(query);
+    // 6. 执行搜索
+    const contextPack = await service.buildContextPack(query);
 
-  // 详细日志：seeds 信息
-  if (contextPack.seeds.length > 0) {
+    // 详细日志：seeds 信息
+    if (contextPack.seeds.length > 0) {
+      logger.info(
+        {
+          seeds: contextPack.seeds.map((s) => ({
+            file: s.filePath,
+            chunk: s.chunkIndex,
+            score: s.score.toFixed(4),
+            source: s.source,
+          })),
+        },
+        'MCP 搜索 seeds',
+      );
+    } else {
+      logger.warn('MCP 搜索无 seeds 命中');
+    }
+
+    // 详细日志：扩展结果
+    if (contextPack.expanded.length > 0) {
+      logger.debug(
+        {
+          expandedCount: contextPack.expanded.length,
+          expanded: contextPack.expanded.slice(0, 5).map((e) => ({
+            file: e.filePath,
+            chunk: e.chunkIndex,
+            score: e.score.toFixed(4),
+          })),
+        },
+        'MCP 扩展结果 (前5)',
+      );
+    }
+
+    // 详细日志：打包后的文件段落
     logger.info(
       {
-        seeds: contextPack.seeds.map((s) => ({
-          file: s.filePath,
-          chunk: s.chunkIndex,
-          score: s.score.toFixed(4),
-          source: s.source,
-        })),
-      },
-      'MCP 搜索 seeds',
-    );
-  } else {
-    logger.warn('MCP 搜索无 seeds 命中');
-  }
-
-  // 详细日志：扩展结果
-  if (contextPack.expanded.length > 0) {
-    logger.debug(
-      {
+        seedCount: contextPack.seeds.length,
         expandedCount: contextPack.expanded.length,
-        expanded: contextPack.expanded.slice(0, 5).map((e) => ({
-          file: e.filePath,
-          chunk: e.chunkIndex,
-          score: e.score.toFixed(4),
+        fileCount: contextPack.files.length,
+        totalSegments: contextPack.files.reduce((acc, f) => acc + f.segments.length, 0),
+        files: contextPack.files.map((f) => ({
+          path: f.filePath,
+          segments: f.segments.length,
+          lines: f.segments.map((s) => `L${s.startLine}-${s.endLine}`),
         })),
+        timingMs: contextPack.debug?.timingMs,
       },
-      'MCP 扩展结果 (前5)',
+      'MCP codebase-retrieval 完成',
     );
+
+    // 7. 格式化输出
+    return formatMcpResponse(contextPack);
+  } finally {
+    service.close();
   }
-
-  // 详细日志：打包后的文件段落
-  logger.info(
-    {
-      seedCount: contextPack.seeds.length,
-      expandedCount: contextPack.expanded.length,
-      fileCount: contextPack.files.length,
-      totalSegments: contextPack.files.reduce((acc, f) => acc + f.segments.length, 0),
-      files: contextPack.files.map((f) => ({
-        path: f.filePath,
-        segments: f.segments.length,
-        lines: f.segments.map((s) => `L${s.startLine}-${s.endLine}`),
-      })),
-      timingMs: contextPack.debug?.timingMs,
-    },
-    'MCP codebase-retrieval 完成',
-  );
-
-  // 7. 格式化输出
-  return formatMcpResponse(contextPack);
 }
 
 // 响应格式化

@@ -10,25 +10,15 @@ import path from 'node:path';
 import { logger } from './logger.js';
 
 const BASE_DIR = path.join(os.homedir(), '.contextweaver');
+const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 锁最大持有时长
 const LOCK_CHECK_INTERVAL_MS = 100; // 检查间隔
-const LOCK_WRITE_GRACE_MS = 2000; // 锁文件写入宽限期，避免误删刚创建的锁
+const LOCK_HEARTBEAT_INTERVAL_MS = 5 * 1000; // 心跳刷新间隔
 
 interface LockInfo {
   pid: number;
   timestamp: number;
   operation: string;
-}
-
-/**
- * 获取锁文件年龄（毫秒）
- */
-function getLockAgeMs(lockPath: string): number | null {
-  try {
-    const stats = fs.statSync(lockPath);
-    return Date.now() - stats.mtimeMs;
-  } catch {
-    return null;
-  }
+  token: string;
 }
 
 /**
@@ -39,44 +29,180 @@ function getLockFilePath(projectId: string): string {
 }
 
 /**
- * 检查锁是否有效
- *
- * 锁无效的情况：
- * 1. 锁文件不存在
- * 2. 持有锁的进程已死亡
+ * 判断项目当前是否处于锁定状态
  */
-function isLockValid(lockPath: string): boolean {
+export function isProjectLocked(projectId: string): boolean {
+  return isLockValid(getLockFilePath(projectId));
+}
+
+/**
+ * 读取锁文件内容
+ */
+function readLockInfo(lockPath: string): LockInfo | null {
   try {
     if (!fs.existsSync(lockPath)) {
-      return false;
+      return null;
     }
 
     const content = fs.readFileSync(lockPath, 'utf-8');
-    const lockInfo: LockInfo = JSON.parse(content);
-
-    // 检查进程是否存活（跨平台）
-    try {
-      process.kill(lockInfo.pid, 0); // 发送信号 0 只检查进程是否存在
-      return true;
-    } catch (err) {
-      const error = err as NodeJS.ErrnoException;
-      if (error.code === 'EPERM') {
-        // 没权限发信号但进程存在，视为锁仍有效
-        return true;
-      }
-      logger.warn({ pid: lockInfo.pid }, '持有锁的进程已死亡');
-      return false;
-    }
+    return JSON.parse(content) as LockInfo;
   } catch (err) {
-    const ageMs = getLockAgeMs(lockPath);
-    if (ageMs !== null && ageMs <= LOCK_WRITE_GRACE_MS) {
-      // 刚创建的锁可能尚未写完，短暂视为有效，避免竞态误删
-      return true;
-    }
     const error = err as { message?: string };
     logger.debug({ error: error.message }, '读取锁文件失败');
+    return null;
+  }
+}
+
+/**
+ * 比较两份锁信息是否指向同一个持有者
+ */
+function lockInfoMatches(left: LockInfo | null, right: LockInfo | null): boolean {
+  if (!left || !right) {
     return false;
   }
+  return (
+    left.pid === right.pid &&
+    left.timestamp === right.timestamp &&
+    left.operation === right.operation &&
+    left.token === right.token
+  );
+}
+
+/**
+ * 判断锁信息是否仍然有效
+ */
+function isLockInfoActive(lockInfo: LockInfo, lockPath: string): boolean {
+  if (Date.now() - lockInfo.timestamp > LOCK_TIMEOUT_MS) {
+    logger.warn({ lockInfo, lockPath }, '锁已超时');
+    return false;
+  }
+
+  try {
+    process.kill(lockInfo.pid, 0);
+    return true;
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException;
+    if (error.code === 'EPERM') {
+      return true;
+    }
+    logger.warn({ pid: lockInfo.pid }, '持有锁的进程已死亡');
+    return false;
+  }
+}
+
+/**
+ * 检查锁是否有效
+ */
+function isLockValid(lockPath: string): boolean {
+  const lockInfo = readLockInfo(lockPath);
+  if (!lockInfo) {
+    return false;
+  }
+  return isLockInfoActive(lockInfo, lockPath);
+}
+
+/**
+ * 构建锁元数据
+ */
+function buildLockInfo(operation: string, token: string): LockInfo {
+  return {
+    pid: process.pid,
+    timestamp: Date.now(),
+    operation,
+    token,
+  };
+}
+
+/**
+ * 删除锁文件
+ */
+function removeLockFile(lockPath: string): void {
+  try {
+    if (fs.existsSync(lockPath)) {
+      fs.unlinkSync(lockPath);
+    }
+  } catch (err) {
+    const error = err as { message?: string };
+    logger.debug({ error: error.message }, '删除锁文件失败');
+  }
+}
+
+/**
+ * 获取临时锁文件路径
+ */
+function getLockTempFilePath(lockPath: string, token: string): string {
+  return `${lockPath}.${token}.tmp`;
+}
+
+/**
+ * 使用临时文件原子创建锁，避免其他进程读到半写入内容
+ */
+function createLockFile(lockPath: string, operation: string, token: string): boolean {
+  const tempPath = getLockTempFilePath(lockPath, token);
+
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify(buildLockInfo(operation, token)), { flag: 'w' });
+    fs.linkSync(tempPath, lockPath);
+    return true;
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException;
+    if (error.code !== 'EEXIST') {
+      logger.debug({ error: error.message }, '原子创建锁失败');
+    }
+    return false;
+  } finally {
+    try {
+      if (fs.existsSync(tempPath)) {
+        fs.unlinkSync(tempPath);
+      }
+    } catch {
+      // 忽略临时文件清理失败
+    }
+  }
+}
+
+/**
+ * 原子刷新锁内容，避免其他进程读到半写入状态
+ */
+function refreshLockFile(lockPath: string, operation: string, token: string): void {
+  const tempPath = getLockTempFilePath(lockPath, `${token}.heartbeat`);
+
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify(buildLockInfo(operation, token)), { flag: 'w' });
+    fs.renameSync(tempPath, lockPath);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tempPath)) {
+        fs.unlinkSync(tempPath);
+      }
+    } catch {
+      // 忽略临时文件清理失败
+    }
+    throw err;
+  }
+}
+
+/**
+ * 启动锁心跳
+ */
+function startLockHeartbeat(projectId: string, operation: string, token: string): () => void {
+  const lockPath = getLockFilePath(projectId);
+  const timer = setInterval(() => {
+    const lockInfo = readLockInfo(lockPath);
+    if (!lockInfo || lockInfo.pid !== process.pid || lockInfo.token !== token) {
+      return;
+    }
+
+    try {
+      refreshLockFile(lockPath, operation, token);
+    } catch (err) {
+      const error = err as { message?: string };
+      logger.debug({ error: error.message }, '刷新锁心跳失败');
+    }
+  }, LOCK_HEARTBEAT_INTERVAL_MS);
+
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 /**
@@ -85,67 +211,52 @@ function isLockValid(lockPath: string): boolean {
  * @param projectId 项目 ID
  * @param operation 操作描述（用于日志）
  * @param timeoutMs 等待超时时间，默认 30 秒
- * @returns 是否成功获取锁
+ * @returns 锁句柄，失败时返回 null
  */
 async function acquireLock(
   projectId: string,
   operation: string,
   timeoutMs: number = 30000,
-): Promise<boolean> {
+): Promise<{ token: string } | null> {
   const lockPath = getLockFilePath(projectId);
   const dir = path.dirname(lockPath);
 
-  // 确保目录存在
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
 
   const startTime = Date.now();
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
   while (Date.now() - startTime < timeoutMs) {
-    // 先尝试原子创建锁
-    try {
-      const lockInfo: LockInfo = {
-        pid: process.pid,
-        timestamp: Date.now(),
-        operation,
-      };
+    const existingLockInfo = readLockInfo(lockPath);
 
-      // 使用 wx：文件已存在则抛 EEXIST，避免锁被覆盖
-      fs.writeFileSync(lockPath, JSON.stringify(lockInfo), { flag: 'wx' });
-      logger.debug({ projectId: projectId.slice(0, 10), operation }, '获取锁成功');
-      return true;
-    } catch (err) {
-      const error = err as NodeJS.ErrnoException;
-
-      // 锁已存在：检查是否为失效锁，若失效则移除后重试
-      if (error.code === 'EEXIST') {
-        if (!isLockValid(lockPath)) {
-          try {
-            fs.unlinkSync(lockPath);
-            logger.warn({ projectId: projectId.slice(0, 10) }, '移除失效锁');
-            continue;
-          } catch (unlinkErr) {
-            const unlinkError = unlinkErr as NodeJS.ErrnoException;
-            // 可能是并发下其他进程已删除，忽略
-            if (unlinkError.code !== 'ENOENT') {
-              logger.debug({ error: unlinkError.message }, '移除失效锁失败，重试中...');
-            }
-          }
-        } else {
-          logger.debug({ projectId: projectId.slice(0, 10) }, '等待锁释放...');
-        }
-      } else {
-        logger.debug({ error: error.message }, '获取锁失败，重试中...');
+    if (!existingLockInfo) {
+      if (fs.existsSync(lockPath)) {
+        removeLockFile(lockPath);
       }
+
+      if (createLockFile(lockPath, operation, token)) {
+        const verifyInfo = readLockInfo(lockPath);
+        if (verifyInfo?.pid === process.pid && verifyInfo.token === token) {
+          logger.debug({ projectId: projectId.slice(0, 10), operation }, '获取锁成功');
+          return { token };
+        }
+      }
+    } else if (!isLockInfoActive(existingLockInfo, lockPath)) {
+      const latestLockInfo = readLockInfo(lockPath);
+      if (lockInfoMatches(existingLockInfo, latestLockInfo)) {
+        removeLockFile(lockPath);
+      }
+    } else {
+      logger.debug({ projectId: projectId.slice(0, 10) }, '等待锁释放...');
     }
 
-    // 等待后重试
     await new Promise((resolve) => setTimeout(resolve, LOCK_CHECK_INTERVAL_MS));
   }
 
   logger.warn({ projectId: projectId.slice(0, 10), timeoutMs }, '获取锁超时');
-  return false;
+  return null;
 }
 
 /**
@@ -153,7 +264,7 @@ async function acquireLock(
  *
  * @param projectId 项目 ID
  */
-function releaseLock(projectId: string): void {
+function releaseLock(projectId: string, token: string): void {
   const lockPath = getLockFilePath(projectId);
 
   try {
@@ -165,11 +276,19 @@ function releaseLock(projectId: string): void {
     const content = fs.readFileSync(lockPath, 'utf-8');
     const lockInfo: LockInfo = JSON.parse(content);
 
-    if (lockInfo.pid === process.pid) {
+    if (lockInfo.pid === process.pid && lockInfo.token === token) {
       fs.unlinkSync(lockPath);
       logger.debug({ projectId: projectId.slice(0, 10) }, '释放锁成功');
     } else {
-      logger.warn({ ownPid: process.pid, lockPid: lockInfo.pid }, '尝试释放非自己持有的锁');
+      logger.warn(
+        {
+          ownPid: process.pid,
+          ownToken: token,
+          lockPid: lockInfo.pid,
+          lockToken: lockInfo.token,
+        },
+        '尝试释放非自己持有的锁',
+      );
     }
   } catch (err) {
     const error = err as { message?: string };
@@ -194,15 +313,18 @@ export async function withLock<T>(
   fn: () => Promise<T>,
   timeoutMs: number = 30000,
 ): Promise<T> {
-  const acquired = await acquireLock(projectId, operation, timeoutMs);
+  const lockHandle = await acquireLock(projectId, operation, timeoutMs);
 
-  if (!acquired) {
+  if (!lockHandle) {
     throw new Error(`无法获取项目锁 (${projectId.slice(0, 10)})，其他进程正在操作索引`);
   }
+
+  const stopHeartbeat = startLockHeartbeat(projectId, operation, lockHandle.token);
 
   try {
     return await fn();
   } finally {
-    releaseLock(projectId);
+    stopHeartbeat();
+    releaseLock(projectId, lockHandle.token);
   }
 }

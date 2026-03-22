@@ -2,13 +2,14 @@
 // 配置必须最先加载（包含环境变量初始化）
 import './config.js';
 
-import { promises as fs } from 'node:fs';
+import fsSync, { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import cac from 'cac';
 import { generateProjectId } from './db/index.js';
 import { type ScanStats, scan } from './scanner/index.js';
+import { withLock } from './utils/lock.js';
 import { logger } from './utils/logger.js';
 
 // 读取 package.json 获取版本号
@@ -17,6 +18,37 @@ const pkgPath = path.resolve(__dirname, '../package.json');
 const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf-8'));
 
 const cli = cac('contextweaver');
+
+function getCliIndexLockTimeoutMs(): number {
+  const raw = process.env.CW_INDEX_LOCK_TIMEOUT_MS;
+  if (!raw) {
+    return process.env.CW_BACKGROUND_INDEX === '1' ? 500 : 10 * 60 * 1000;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 10 * 60 * 1000;
+}
+
+function registerBackgroundIndexMarkerCleanup(): void {
+  const markerPath = process.env.CW_BACKGROUND_INDEX_MARKER_PATH;
+  if (!markerPath) {
+    return;
+  }
+
+  const cleanup = () => {
+    try {
+      if (fsSync.existsSync(markerPath)) {
+        fsSync.unlinkSync(markerPath);
+      }
+    } catch {
+      // 忽略清理失败，避免影响主流程退出
+    }
+  };
+
+  process.on('exit', cleanup);
+}
+
+registerBackgroundIndexMarkerCleanup();
 
 // 自定义版本输出，只显示版本号
 if (process.argv.includes('-v') || process.argv.includes('--version')) {
@@ -103,8 +135,6 @@ cli
     const startTime = Date.now();
 
     try {
-      const { withLock } = await import('./utils/lock.js');
-
       // 进度日志节流：只在 30%、60%、90% 时输出（100% 由扫描完成日志代替）
       let lastLoggedPercent = 0;
       const stats: ScanStats = await withLock(
@@ -123,7 +153,7 @@ cli
               }
             },
           }),
-        10 * 60 * 1000,
+        getCliIndexLockTimeoutMs(),
       );
 
       process.stdout.write('\n');
@@ -135,6 +165,10 @@ cli
       );
     } catch (err) {
       const error = err as { message?: string; stack?: string };
+      if (process.env.CW_BACKGROUND_INDEX === '1' && error.message?.includes('无法获取项目锁')) {
+        logger.info('后台索引已由其他进程处理，当前进程退出');
+        process.exit(0);
+      }
       logger.error({ err, stack: error.stack }, `索引失败: ${error.message}`);
       process.exit(1);
     }
@@ -180,13 +214,11 @@ cli
 
       const { handleCodebaseRetrieval } = await import('./mcp/tools/codebaseRetrieval.js');
 
-      const response = await handleCodebaseRetrieval(
-        {
-          repo_path: repoPath,
-          information_request: informationRequest,
-          technical_terms: technicalTerms.length > 0 ? technicalTerms : undefined,
-        },
-      );
+      const response = await handleCodebaseRetrieval({
+        repo_path: repoPath,
+        information_request: informationRequest,
+        technical_terms: technicalTerms.length > 0 ? technicalTerms : undefined,
+      });
 
       const text = response.content.map((item) => item.text).join('\n');
       process.stdout.write(`${text}\n`);

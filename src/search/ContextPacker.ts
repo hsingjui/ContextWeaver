@@ -5,7 +5,7 @@
  * 最终输出适合 LLM 消费的上下文包。
  */
 
-import { initDb } from '../db/index.js';
+import { closeDb, initDb } from '../db/index.js';
 import type { ScoredChunk, SearchConfig, Segment } from './types.js';
 
 export class ContextPacker {
@@ -28,60 +28,64 @@ export class ContextPacker {
 
     // 2. 每个文件内合并区间 + 从原文件切片
     const db = initDb(this.projectId);
-    const result: Array<{ filePath: string; segments: Segment[] }> = [];
-    let totalChars = 0;
+    try {
+      const result: Array<{ filePath: string; segments: Segment[] }> = [];
+      let totalChars = 0;
 
-    // 按文件最高得分排序
-    const sortedFiles = Object.entries(byFile)
-      .map(([filePath, fileChunks]) => ({
-        filePath,
-        chunks: fileChunks,
-        maxScore: Math.max(...fileChunks.map((c) => c.score)),
-      }))
-      .sort((a, b) => b.maxScore - a.maxScore);
+      // 按文件最高得分排序
+      const sortedFiles = Object.entries(byFile)
+        .map(([filePath, fileChunks]) => ({
+          filePath,
+          chunks: fileChunks,
+          maxScore: Math.max(...fileChunks.map((c) => c.score)),
+        }))
+        .sort((a, b) => b.maxScore - a.maxScore);
 
-    // 性能优化：批量读取所有文件内容（N 次 SELECT → 1 次）
-    const allFilePaths = sortedFiles.map((f) => f.filePath);
-    const placeholders = allFilePaths.map(() => '?').join(',');
-    const rows = db
-      .prepare(`SELECT path, content FROM files WHERE path IN (${placeholders})`)
-      .all(...allFilePaths) as Array<{ path: string; content: string }>;
-    const contentMap = new Map(rows.map((r) => [r.path, r.content]));
+      // 性能优化：批量读取所有文件内容（N 次 SELECT → 1 次）
+      const allFilePaths = sortedFiles.map((f) => f.filePath);
+      const placeholders = allFilePaths.map(() => '?').join(',');
+      const rows = db
+        .prepare(`SELECT path, content FROM files WHERE path IN (${placeholders})`)
+        .all(...allFilePaths) as Array<{ path: string; content: string }>;
+      const contentMap = new Map(rows.map((r) => [r.path, r.content]));
 
-    for (const { filePath, chunks: fileChunks } of sortedFiles) {
-      // 从批量结果中获取文件内容
-      const content = contentMap.get(filePath);
-      if (!content) continue;
+      for (const { filePath, chunks: fileChunks } of sortedFiles) {
+        // 从批量结果中获取文件内容
+        const content = contentMap.get(filePath);
+        if (!content) continue;
 
-      // 合并区间
-      const segments = this.mergeAndSlice(fileChunks, content);
+        // 合并区间
+        const segments = this.mergeAndSlice(fileChunks, content);
 
-      // 每文件最多 N 段
-      const topSegments = segments
-        .sort((a, b) => b.score - a.score)
-        .slice(0, this.config.maxSegmentsPerFile)
-        .sort((a, b) => a.rawStart - b.rawStart); // 按位置排序输出
+        // 每文件最多 N 段
+        const topSegments = segments
+          .sort((a, b) => b.score - a.score)
+          .slice(0, this.config.maxSegmentsPerFile)
+          .sort((a, b) => a.rawStart - b.rawStart); // 按位置排序输出
 
-      // 预算检查
-      const budgetedSegments: Segment[] = [];
-      for (const seg of topSegments) {
-        if (totalChars + seg.text.length > this.config.maxTotalChars) {
-          // 预算用尽，停止添加
-          break;
+        // 预算检查
+        const budgetedSegments: Segment[] = [];
+        for (const seg of topSegments) {
+          if (totalChars + seg.text.length > this.config.maxTotalChars) {
+            // 预算用尽，停止添加
+            break;
+          }
+          totalChars += seg.text.length;
+          budgetedSegments.push(seg);
         }
-        totalChars += seg.text.length;
-        budgetedSegments.push(seg);
+
+        if (budgetedSegments.length > 0) {
+          result.push({ filePath, segments: budgetedSegments });
+        }
+
+        // 预算用尽
+        if (totalChars >= this.config.maxTotalChars) break;
       }
 
-      if (budgetedSegments.length > 0) {
-        result.push({ filePath, segments: budgetedSegments });
-      }
-
-      // 预算用尽
-      if (totalChars >= this.config.maxTotalChars) break;
+      return result;
+    } finally {
+      closeDb(db);
     }
-
-    return result;
   }
 
   /**
