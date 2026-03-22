@@ -11,7 +11,7 @@
 import type Database from 'better-sqlite3';
 import { getRerankerClient } from '../api/reranker.js';
 import { getEmbeddingConfig } from '../config.js';
-import { initDb } from '../db/index.js';
+import { closeDb, initDb } from '../db/index.js';
 import { getIndexer, type Indexer } from '../indexer/index.js';
 import { isDebugEnabled, logger } from '../utils/logger.js';
 import type { SearchResult as VectorSearchResult } from '../vectorStore/index.js';
@@ -67,6 +67,15 @@ export class SearchService {
     this.indexer = await getIndexer(this.projectId, embeddingConfig.dimensions);
     this.vectorStore = await getVectorStore(this.projectId, embeddingConfig.dimensions);
     this.db = initDb(this.projectId);
+  }
+
+  close(): void {
+    if (this.db) {
+      closeDb(this.db);
+      this.db = null;
+    }
+    this.indexer = null;
+    this.vectorStore = null;
   }
 
   // 公开接口
@@ -669,11 +678,15 @@ export class SearchService {
     if (seeds.length === 0) return [];
 
     const expander = await getGraphExpander(this.projectId, this.config);
-    const { chunks, stats } = await expander.expand(seeds, queryTokens);
+    try {
+      const { chunks, stats } = await expander.expand(seeds, queryTokens);
 
-    logger.debug(stats, '上下文扩展统计');
+      logger.debug(stats, '上下文扩展统计');
 
-    return chunks;
+      return chunks;
+    } finally {
+      expander.close();
+    }
   }
 
   // 工具方法

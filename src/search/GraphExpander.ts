@@ -9,7 +9,7 @@
 
 import type Database from 'better-sqlite3';
 import { getEmbeddingConfig } from '../config.js';
-import { initDb } from '../db/index.js';
+import { closeDb, initDb } from '../db/index.js';
 import { logger } from '../utils/logger.js';
 import { type ChunkRecord, getVectorStore, type VectorStore } from '../vectorStore/index.js';
 import { createResolvers, type ImportResolver } from './resolvers/index.js';
@@ -55,6 +55,15 @@ export class GraphExpander {
     const embeddingConfig = getEmbeddingConfig();
     this.vectorStore = await getVectorStore(this.projectId, embeddingConfig.dimensions);
     this.db = initDb(this.projectId);
+  }
+
+  close(): void {
+    if (this.db) {
+      closeDb(this.db);
+      this.db = null;
+    }
+    this.allFilePaths = null;
+    this.vectorStore = null;
   }
 
   /**
@@ -521,20 +530,11 @@ export class GraphExpander {
 // 工厂函数
 // ===========================================
 
-const expanders = new Map<string, GraphExpander>();
-
-/**
- * 获取或创建 GraphExpander 实例
- */
 export async function getGraphExpander(
   projectId: string,
   config: SearchConfig,
 ): Promise<GraphExpander> {
-  let expander = expanders.get(projectId);
-  if (!expander) {
-    expander = new GraphExpander(projectId, config);
-    await expander.init();
-    expanders.set(projectId, expander);
-  }
+  const expander = new GraphExpander(projectId, config);
+  await expander.init();
   return expander;
 }
