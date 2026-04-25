@@ -173,7 +173,7 @@ cli
         process.exit(1);
       }
 
-      const technicalTerms = (options.technicalTerms || '')
+      const technicalTerms = String(options.technicalTerms ?? '')
         .split(',')
         .map((t) => t.trim())
         .filter(Boolean);
