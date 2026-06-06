@@ -80,12 +80,13 @@ EMBEDDINGS_MODEL=BAAI/bge-m3
 EMBEDDINGS_MAX_CONCURRENCY=10
 EMBEDDINGS_DIMENSIONS=1024
 
-# Voyage 兼容配置（可选）
+# Voyage example:
 # EMBEDDINGS_PROVIDER=voyage
 # EMBEDDINGS_BASE_URL=https://api.voyageai.com/v1/embeddings
 # EMBEDDINGS_MODEL=voyage-code-3
-# EMBEDDINGS_OUTPUT_DIMENSION=1024
-# EMBEDDINGS_TRUNCATION=true
+# EMBEDDINGS_DIMENSIONS=1024
+# EMBEDDINGS_OUTPUT_DIMENSION=1024  # 可选；不配置则使用 Voyage 模型默认维度
+# EMBEDDINGS_OUTPUT_DTYPE=float     # 可选；默认 float
 
 # Reranker 配置（必需）
 RERANK_API_KEY=your-api-key-here
@@ -272,9 +273,9 @@ contextweaver/
 | `EMBEDDINGS_MODEL` | ✅ | - | Embedding 模型名称 |
 | `EMBEDDINGS_PROVIDER` | ❌ | auto | `voyage` 或 `openai-compatible`，未设置时根据 URL 自动识别 Voyage |
 | `EMBEDDINGS_MAX_CONCURRENCY` | ❌ | 10 | Embedding 并发数 |
-| `EMBEDDINGS_DIMENSIONS` | ❌ | 1024 | 向量维度 |
-| `EMBEDDINGS_OUTPUT_DIMENSION` | ❌ | - | Voyage 输出向量维度，应与 `EMBEDDINGS_DIMENSIONS` 保持一致 |
-| `EMBEDDINGS_TRUNCATION` | ❌ | - | Voyage 是否截断超长输入 |
+| `EMBEDDINGS_DIMENSIONS` | ❌ | 1024 | 本地向量库维度，必须与 Embedding API 实际返回维度一致 |
+| `EMBEDDINGS_OUTPUT_DIMENSION` | ❌ | - | Voyage 输出向量维度；不配置则使用 Voyage 模型默认维度，实际返回维度仍必须与 `EMBEDDINGS_DIMENSIONS` 一致 |
+| `EMBEDDINGS_OUTPUT_DTYPE` | ❌ | float | Voyage 输出向量数据类型，可选：`float` / `int8` / `uint8` / `binary` / `ubinary` |
 | `RERANK_API_KEY` | ✅ | - | Reranker API 密钥 |
 | `RERANK_BASE_URL` | ✅ | - | Reranker API 地址 |
 | `RERANK_MODEL` | ✅ | - | Reranker 模型名称 |

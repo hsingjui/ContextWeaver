@@ -52,6 +52,9 @@ loadEnv();
 
 // API 配置类型定义
 
+const EMBEDDING_OUTPUT_DTYPES = ['float', 'int8', 'uint8', 'binary', 'ubinary'] as const;
+type EmbeddingOutputDtype = (typeof EMBEDDING_OUTPUT_DTYPES)[number];
+
 export interface EmbeddingConfig {
   apiKey: string;
   baseUrl: string;
@@ -63,8 +66,8 @@ export interface EmbeddingConfig {
   provider: 'openai-compatible' | 'voyage';
   /** Voyage 可选参数：输出向量维度 */
   outputDimension?: number;
-  /** Voyage 可选参数：是否截断超长输入 */
-  truncation?: boolean;
+  /** Voyage 可选参数：输出向量数据类型 */
+  outputDtype?: EmbeddingOutputDtype;
 }
 
 export interface RerankerConfig {
@@ -159,14 +162,17 @@ export function getEmbeddingConfig(): EmbeddingConfig {
 
   const dimensions = parseInt(process.env.EMBEDDINGS_DIMENSIONS || '1024', 10);
   const outputDimension = parseInt(process.env.EMBEDDINGS_OUTPUT_DIMENSION || '', 10);
+  const rawOutputDtype = process.env.EMBEDDINGS_OUTPUT_DTYPE;
+  if (rawOutputDtype && !EMBEDDING_OUTPUT_DTYPES.includes(rawOutputDtype as EmbeddingOutputDtype)) {
+    throw new Error(
+      `EMBEDDINGS_OUTPUT_DTYPE 仅支持: ${EMBEDDING_OUTPUT_DTYPES.join(', ')}`,
+    );
+  }
+  const outputDtype = rawOutputDtype as EmbeddingOutputDtype | undefined;
   const provider =
-    process.env.EMBEDDINGS_PROVIDER === 'voyage' || baseUrl.includes('voyageai.com')
+    process.env.EMBEDDINGS_PROVIDER === 'voyage' || baseUrl.toLowerCase().includes('voyageai.com')
       ? 'voyage'
       : 'openai-compatible';
-  const truncation =
-    process.env.EMBEDDINGS_TRUNCATION === undefined
-      ? undefined
-      : process.env.EMBEDDINGS_TRUNCATION === 'true';
 
   return {
     apiKey,
@@ -176,7 +182,7 @@ export function getEmbeddingConfig(): EmbeddingConfig {
     dimensions: Number.isNaN(dimensions) ? 1024 : dimensions,
     provider,
     outputDimension: Number.isNaN(outputDimension) ? undefined : outputDimension,
-    truncation,
+    outputDtype,
   };
 }
 

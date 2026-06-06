@@ -63,12 +63,13 @@ EMBEDDINGS_MODEL=BAAI/bge-m3
 EMBEDDINGS_MAX_CONCURRENCY=10
 EMBEDDINGS_DIMENSIONS=1024
 
-# Voyage 兼容配置（可选）
+# Voyage example:
 # EMBEDDINGS_PROVIDER=voyage
 # EMBEDDINGS_BASE_URL=https://api.voyageai.com/v1/embeddings
 # EMBEDDINGS_MODEL=voyage-code-3
-# EMBEDDINGS_OUTPUT_DIMENSION=1024
-# EMBEDDINGS_TRUNCATION=true
+# EMBEDDINGS_DIMENSIONS=1024
+# EMBEDDINGS_OUTPUT_DIMENSION=1024  # 可选；不配置则使用 Voyage 模型默认维度
+# EMBEDDINGS_OUTPUT_DTYPE=float     # 可选；默认 float
 
 # Reranker 配置（必需）
 RERANK_API_KEY=your-api-key-here

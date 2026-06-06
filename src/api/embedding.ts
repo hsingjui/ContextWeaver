@@ -21,7 +21,7 @@ interface EmbeddingRequest {
   encoding_format?: 'float' | 'base64';
   input_type?: EmbeddingInputType;
   output_dimension?: number;
-  truncation?: boolean;
+  output_dtype?: 'float' | 'int8' | 'uint8' | 'binary' | 'ubinary';
 }
 
 /** 单个 Embedding 结果 */
@@ -327,7 +327,7 @@ export class EmbeddingClient {
    * 获取单个文本的 Embedding
    */
   async embed(text: string, inputType: EmbeddingInputType = 'query'): Promise<number[]> {
-    const results = await this.embedBatch([text], 20, undefined, inputType);
+    const results = await this.embedBatch([text], 1, undefined, inputType);
     return results[0].embedding;
   }
 
@@ -529,11 +529,10 @@ export class EmbeddingClient {
 
     if (this.config.provider === 'voyage') {
       requestBody.input_type = inputType;
-      if (this.config.outputDimension !== undefined) {
+      requestBody.output_dtype = this.config.outputDtype ?? 'float';
+
+      if (Number.isFinite(this.config.outputDimension)) {
         requestBody.output_dimension = this.config.outputDimension;
-      }
-      if (this.config.truncation !== undefined) {
-        requestBody.truncation = this.config.truncation;
       }
     } else {
       requestBody.encoding_format = 'float';
