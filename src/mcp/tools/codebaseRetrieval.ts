@@ -14,6 +14,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { generateProjectId } from '../../db/index.js';
 // 注意：SearchService 和 scan 改为延迟导入，避免在 MCP 启动时就加载 native 模块
+import type { ScanStats } from '../../scanner/index.js';
 import type { ContextPack, Segment } from '../../search/types.js';
 import { logger } from '../../utils/logger.js';
 
@@ -77,6 +78,13 @@ EMBEDDINGS_MODEL=BAAI/bge-m3
 EMBEDDINGS_MAX_CONCURRENCY=10
 EMBEDDINGS_DIMENSIONS=1024
 
+# Voyage 兼容配置（可选）
+# EMBEDDINGS_PROVIDER=voyage
+# EMBEDDINGS_BASE_URL=https://api.voyageai.com/v1/embeddings
+# EMBEDDINGS_MODEL=voyage-code-3
+# EMBEDDINGS_OUTPUT_DIMENSION=1024
+# EMBEDDINGS_TRUNCATION=true
+
 # Reranker 配置（必需）
 RERANK_API_KEY=your-api-key-here
 RERANK_BASE_URL=https://api.siliconflow.cn/v1/rerank
@@ -115,12 +123,12 @@ async function ensureIndexed(
   repoPath: string,
   projectId: string,
   onProgress?: (current: number, total?: number, message?: string) => void,
-): Promise<void> {
+): Promise<ScanStats> {
   // 延迟导入锁和 scan 函数（避免 MCP 启动时加载 native 模块）
   const { withLock } = await import('../../utils/lock.js');
   const { scan } = await import('../../scanner/index.js');
 
-  await withLock(projectId, 'index', async () => {
+  return withLock(projectId, 'index', async () => {
     const wasIndexed = isProjectIndexed(projectId);
 
     if (!wasIndexed) {
@@ -150,6 +158,8 @@ async function ensureIndexed(
       },
       '索引完成',
     );
+
+    return stats;
   }, INDEX_LOCK_TIMEOUT_MS);
 }
 
@@ -196,7 +206,17 @@ export async function handleCodebaseRetrieval(
   const projectId = generateProjectId(repo_path);
 
   // 2. 确保代码库已索引（自动初始化 + 增量更新）
-  await ensureIndexed(repo_path, projectId, onProgress);
+  const indexStats = await ensureIndexed(repo_path, projectId, onProgress);
+  if (indexStats.vectorIndex && indexStats.vectorIndex.errors > 0) {
+    logger.warn(
+      {
+        projectId: projectId.slice(0, 10),
+        vectorIndex: indexStats.vectorIndex,
+      },
+      '向量索引失败，返回重建索引提示',
+    );
+    return formatVectorIndexFailedResponse(repo_path, indexStats);
+  }
 
   // 3. 合并查询
   // - information_request 驱动语义向量搜索
@@ -273,6 +293,35 @@ export async function handleCodebaseRetrieval(
 
   // 7. 格式化输出
   return formatMcpResponse(contextPack);
+}
+
+/**
+ * 格式化向量索引失败响应
+ */
+function formatVectorIndexFailedResponse(
+  repoPath: string,
+  stats: ScanStats,
+): { content: Array<{ type: 'text'; text: string }> } {
+  const vectorIndex = stats.vectorIndex;
+  const text = `## 向量索引失败
+
+Embedding 阶段有 ${vectorIndex?.errors ?? 0} 个文件索引失败，本次检索未继续执行。
+
+请修复 Embedding 配置或网络问题后重新创建索引：
+
+\`\`\`bash
+contextweaver index "${repoPath}" --force
+\`\`\`
+`;
+
+  return {
+    content: [
+      {
+        type: 'text',
+        text,
+      },
+    ],
+  };
 }
 
 // 响应格式化

@@ -153,15 +153,17 @@ export class Indexer {
       stats.errors = indexResult.errors;
     }
 
-    logger.info(
-      {
-        indexed: stats.indexed,
-        vectorRecordsDeleted: stats.deleted,
-        errors: stats.errors,
-        skipped: stats.skipped,
-      },
-      '向量索引完成',
-    );
+    const logPayload = {
+      indexed: stats.indexed,
+      vectorRecordsDeleted: stats.deleted,
+      errors: stats.errors,
+      skipped: stats.skipped,
+    };
+    if (stats.errors > 0) {
+      logger.warn(logPayload, '向量索引失败，请重新创建索引');
+    } else {
+      logger.info(logPayload, '向量索引完成');
+    }
 
     return stats;
   }
@@ -208,7 +210,7 @@ export class Indexer {
     let embeddings: number[][];
     try {
       // 传递进度回调给 embedBatch，让它在每个 API 批次完成时报告进度
-      const results = await this.embeddingClient.embedBatch(allTexts, 20, onProgress);
+      const results = await this.embeddingClient.embedBatch(allTexts, 20, onProgress, 'document');
       embeddings = results.map((r) => r.embedding);
     } catch (err) {
       const error = err as { message?: string; stack?: string };
@@ -368,7 +370,7 @@ export class Indexer {
    * 文本搜索（先 embedding 再向量搜索）
    */
   async textSearch(query: string, limit = 10, filter?: string) {
-    const queryVector = await this.embeddingClient.embed(query);
+    const queryVector = await this.embeddingClient.embed(query, 'query');
     return this.search(queryVector, limit, filter);
   }
 

@@ -59,6 +59,12 @@ export interface EmbeddingConfig {
   maxConcurrency: number;
   /** 向量维度 */
   dimensions: number;
+  /** Embedding API 提供方，用于兼容非 OpenAI 格式的请求参数 */
+  provider: 'openai-compatible' | 'voyage';
+  /** Voyage 可选参数：输出向量维度 */
+  outputDimension?: number;
+  /** Voyage 可选参数：是否截断超长输入 */
+  truncation?: boolean;
 }
 
 export interface RerankerConfig {
@@ -152,6 +158,15 @@ export function getEmbeddingConfig(): EmbeddingConfig {
   }
 
   const dimensions = parseInt(process.env.EMBEDDINGS_DIMENSIONS || '1024', 10);
+  const outputDimension = parseInt(process.env.EMBEDDINGS_OUTPUT_DIMENSION || '', 10);
+  const provider =
+    process.env.EMBEDDINGS_PROVIDER === 'voyage' || baseUrl.includes('voyageai.com')
+      ? 'voyage'
+      : 'openai-compatible';
+  const truncation =
+    process.env.EMBEDDINGS_TRUNCATION === undefined
+      ? undefined
+      : process.env.EMBEDDINGS_TRUNCATION === 'true';
 
   return {
     apiKey,
@@ -159,6 +174,9 @@ export function getEmbeddingConfig(): EmbeddingConfig {
     model,
     maxConcurrency: Number.isNaN(maxConcurrency) ? 4 : maxConcurrency,
     dimensions: Number.isNaN(dimensions) ? 1024 : dimensions,
+    provider,
+    outputDimension: Number.isNaN(outputDimension) ? undefined : outputDimension,
+    truncation,
   };
 }
 

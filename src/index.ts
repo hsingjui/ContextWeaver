@@ -63,6 +63,13 @@ EMBEDDINGS_MODEL=BAAI/bge-m3
 EMBEDDINGS_MAX_CONCURRENCY=10
 EMBEDDINGS_DIMENSIONS=1024
 
+# Voyage 兼容配置（可选）
+# EMBEDDINGS_PROVIDER=voyage
+# EMBEDDINGS_BASE_URL=https://api.voyageai.com/v1/embeddings
+# EMBEDDINGS_MODEL=voyage-code-3
+# EMBEDDINGS_OUTPUT_DIMENSION=1024
+# EMBEDDINGS_TRUNCATION=true
+
 # Reranker 配置（必需）
 RERANK_API_KEY=your-api-key-here
 RERANK_BASE_URL=https://api.siliconflow.cn/v1/rerank
@@ -129,10 +136,21 @@ cli
       process.stdout.write('\n');
 
       const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-      logger.info(`索引完成 (${duration}s)`);
+      const vectorIndexFailed = stats.vectorIndex !== undefined && stats.vectorIndex.errors > 0;
+      if (vectorIndexFailed) {
+        logger.warn(`扫描完成，但向量索引失败 (${duration}s)`);
+      } else {
+        logger.info(`索引完成 (${duration}s)`);
+      }
       logger.info(
         `总数:${stats.totalFiles} 新增:${stats.added} 修改:${stats.modified} 未变:${stats.unchanged} 删除:${stats.deleted} 跳过:${stats.skipped} 错误:${stats.errors}`,
       );
+      if (vectorIndexFailed) {
+        logger.warn(
+          `向量索引失败: 成功:${stats.vectorIndex?.indexed ?? 0} 删除:${stats.vectorIndex?.deleted ?? 0} 错误:${stats.vectorIndex?.errors ?? 0}`,
+        );
+        logger.warn(`请修复 Embedding 配置或网络问题后重新创建索引: contextweaver index "${rootPath}" --force`);
+      }
     } catch (err) {
       const error = err as { message?: string; stack?: string };
       logger.error({ err, stack: error.stack }, `索引失败: ${error.message}`);

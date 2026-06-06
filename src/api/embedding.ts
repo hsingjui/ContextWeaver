@@ -1,7 +1,7 @@
 /**
  * Embedding 客户端
  *
- * 调用 SiliconFlow Embedding API，将文本转换为向量
+ * 调用 Embedding API，将文本转换为向量
  * 支持并发控制、批量处理和智能速率限制
  *
  * 速率限制策略：
@@ -19,6 +19,9 @@ interface EmbeddingRequest {
   model: string;
   input: string | string[];
   encoding_format?: 'float' | 'base64';
+  input_type?: EmbeddingInputType;
+  output_dimension?: number;
+  truncation?: boolean;
 }
 
 /** 单个 Embedding 结果 */
@@ -54,6 +57,8 @@ export interface EmbeddingResult {
   embedding: number[];
   index: number;
 }
+
+export type EmbeddingInputType = 'query' | 'document';
 
 /**
  * 进度追踪器
@@ -321,8 +326,8 @@ export class EmbeddingClient {
   /**
    * 获取单个文本的 Embedding
    */
-  async embed(text: string): Promise<number[]> {
-    const results = await this.embedBatch([text]);
+  async embed(text: string, inputType: EmbeddingInputType = 'query'): Promise<number[]> {
+    const results = await this.embedBatch([text], 20, undefined, inputType);
     return results[0].embedding;
   }
 
@@ -331,11 +336,13 @@ export class EmbeddingClient {
    * @param texts 待处理的文本数组
    * @param batchSize 每批次发送的文本数量（默认 20）
    * @param onProgress 可选的进度回调 (completed, total) => void
+   * @param inputType Voyage 检索任务类型：索引用 document，搜索用 query
    */
   async embedBatch(
     texts: string[],
     batchSize = 20,
     onProgress?: (completed: number, total: number) => void,
+    inputType: EmbeddingInputType = 'document',
   ): Promise<EmbeddingResult[]> {
     if (texts.length === 0) {
       return [];
@@ -353,7 +360,7 @@ export class EmbeddingClient {
     // 使用速率限制控制器处理各批次
     const batchResults = await Promise.all(
       batches.map((batch, batchIndex) =>
-        this.processWithRateLimit(batch, batchIndex * batchSize, progress),
+        this.processWithRateLimit(batch, batchIndex * batchSize, progress, inputType),
       ),
     );
 
@@ -372,6 +379,7 @@ export class EmbeddingClient {
     texts: string[],
     startIndex: number,
     progress: ProgressTracker,
+    inputType: EmbeddingInputType,
   ): Promise<EmbeddingResult[]> {
     const MAX_NETWORK_RETRIES = 3;
     const INITIAL_RETRY_DELAY_MS = 1000;
@@ -383,7 +391,7 @@ export class EmbeddingClient {
       await this.rateLimiter.acquire();
 
       try {
-        const result = await this.processBatch(texts, startIndex, progress);
+        const result = await this.processBatch(texts, startIndex, progress, inputType);
         this.rateLimiter.releaseSuccess();
         return result;
       } catch (err) {
@@ -481,12 +489,9 @@ export class EmbeddingClient {
     texts: string[],
     startIndex: number,
     progress: ProgressTracker,
+    inputType: EmbeddingInputType,
   ): Promise<EmbeddingResult[]> {
-    const requestBody: EmbeddingRequest = {
-      model: this.config.model,
-      input: texts,
-      encoding_format: 'float',
-    };
+    const requestBody = this.buildRequestBody(texts, inputType);
 
     const response = await fetch(this.config.baseUrl, {
       method: 'POST',
@@ -497,7 +502,7 @@ export class EmbeddingClient {
       body: JSON.stringify(requestBody),
     });
 
-    const data = (await response.json()) as EmbeddingResponse & EmbeddingErrorResponse;
+    const data = await this.parseJsonResponse(response);
 
     if (!response.ok || data.error) {
       const errorMsg = data.error?.message || `HTTP ${response.status}`;
@@ -514,6 +519,43 @@ export class EmbeddingClient {
     progress.recordBatch(data.usage?.total_tokens || 0);
 
     return results;
+  }
+
+  private buildRequestBody(texts: string[], inputType: EmbeddingInputType): EmbeddingRequest {
+    const requestBody: EmbeddingRequest = {
+      model: this.config.model,
+      input: texts,
+    };
+
+    if (this.config.provider === 'voyage') {
+      requestBody.input_type = inputType;
+      if (this.config.outputDimension !== undefined) {
+        requestBody.output_dimension = this.config.outputDimension;
+      }
+      if (this.config.truncation !== undefined) {
+        requestBody.truncation = this.config.truncation;
+      }
+    } else {
+      requestBody.encoding_format = 'float';
+    }
+
+    return requestBody;
+  }
+
+  private async parseJsonResponse(
+    response: Response,
+  ): Promise<EmbeddingResponse & EmbeddingErrorResponse> {
+    const bodyText = await response.text();
+    try {
+      return JSON.parse(bodyText) as EmbeddingResponse & EmbeddingErrorResponse;
+    } catch (err) {
+      const preview = bodyText.replace(/\s+/g, ' ').slice(0, 200);
+      throw new Error(
+        `Embedding API 返回非 JSON 响应: HTTP ${response.status}, content-type=${response.headers.get(
+          'content-type',
+        ) || 'unknown'}, body=${preview}`,
+      );
+    }
   }
 
   /**

@@ -261,17 +261,47 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
           options.onProgress?.(45, 100, '正在同步向量索引状态...');
         }
 
-        // 传递进度回调给 indexer（embedding API 调用是真正的耗时操作）
-        const indexStats = await indexer.indexFiles(db, allToIndex, (completed, total) => {
-          // 将 embedding 批次进度映射到 45-99 区间（保留 100 给最终完成）
-          const progress = 45 + Math.floor((completed / total) * 54);
-          options.onProgress?.(progress, 100, `正在生成向量嵌入... (${completed}/${total} 批次)`);
-        });
-        stats.vectorIndex = {
-          indexed: indexStats.indexed,
-          deleted: indexStats.deleted,
-          errors: indexStats.errors,
-        };
+        try {
+          // 传递进度回调给 indexer（embedding API 调用是真正的耗时操作）
+          const indexStats = await indexer.indexFiles(db, allToIndex, (completed, total) => {
+            // 将 embedding 批次进度映射到 45-99 区间（保留 100 给最终完成）
+            const progress = 45 + Math.floor((completed / total) * 54);
+            options.onProgress?.(
+              progress,
+              100,
+              `正在生成向量嵌入... (${completed}/${total} 批次)`,
+            );
+          });
+          stats.vectorIndex = {
+            indexed: indexStats.indexed,
+            deleted: indexStats.deleted,
+            errors: indexStats.errors,
+          };
+          if (indexStats.errors > 0) {
+            logger.warn(
+              { errors: indexStats.errors },
+              '向量索引部分失败，请重新创建索引',
+            );
+            options.onProgress?.(100, 100, '向量索引失败，请重新创建索引');
+          }
+        } catch (err) {
+          const error = err as { message?: string; stack?: string };
+          const vectorErrorCount = allToIndex.filter(
+            (r) => (r.status === 'added' || r.status === 'modified') && r.chunks.length > 0,
+          ).length;
+
+          logger.warn(
+            { error: error.message, stack: error.stack, errors: vectorErrorCount },
+            '向量索引失败，保留待索引状态并继续完成扫描；请重新创建索引',
+          );
+          options.onProgress?.(100, 100, '向量索引失败，请重新创建索引');
+
+          stats.vectorIndex = {
+            indexed: 0,
+            deleted: 0,
+            errors: vectorErrorCount,
+          };
+        }
       }
     }
 

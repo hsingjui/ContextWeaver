@@ -80,6 +80,13 @@ EMBEDDINGS_MODEL=BAAI/bge-m3
 EMBEDDINGS_MAX_CONCURRENCY=10
 EMBEDDINGS_DIMENSIONS=1024
 
+# Voyage 兼容配置（可选）
+# EMBEDDINGS_PROVIDER=voyage
+# EMBEDDINGS_BASE_URL=https://api.voyageai.com/v1/embeddings
+# EMBEDDINGS_MODEL=voyage-code-3
+# EMBEDDINGS_OUTPUT_DIMENSION=1024
+# EMBEDDINGS_TRUNCATION=true
+
 # Reranker 配置（必需）
 RERANK_API_KEY=your-api-key-here
 RERANK_BASE_URL=https://api.siliconflow.cn/v1/rerank
@@ -263,8 +270,11 @@ contextweaver/
 | `EMBEDDINGS_API_KEY` | ✅ | - | Embedding API 密钥 |
 | `EMBEDDINGS_BASE_URL` | ✅ | - | Embedding API 地址 |
 | `EMBEDDINGS_MODEL` | ✅ | - | Embedding 模型名称 |
+| `EMBEDDINGS_PROVIDER` | ❌ | auto | `voyage` 或 `openai-compatible`，未设置时根据 URL 自动识别 Voyage |
 | `EMBEDDINGS_MAX_CONCURRENCY` | ❌ | 10 | Embedding 并发数 |
 | `EMBEDDINGS_DIMENSIONS` | ❌ | 1024 | 向量维度 |
+| `EMBEDDINGS_OUTPUT_DIMENSION` | ❌ | - | Voyage 输出向量维度，应与 `EMBEDDINGS_DIMENSIONS` 保持一致 |
+| `EMBEDDINGS_TRUNCATION` | ❌ | - | Voyage 是否截断超长输入 |
 | `RERANK_API_KEY` | ✅ | - | Reranker API 密钥 |
 | `RERANK_BASE_URL` | ✅ | - | Reranker API 地址 |
 | `RERANK_MODEL` | ✅ | - | Reranker 模型名称 |
