@@ -219,14 +219,15 @@ export async function handleCodebaseRetrieval(
   }
 
   // 3. 合并查询
-  // - information_request 驱动语义向量搜索
-  // - technical_terms 增强词法（FTS）匹配
+  // - 保留既有行为：technical_terms 继续增强 semantic / lexical query
+  // - 同时 technical_terms 也会传入 SearchService 走独立 fixed-string exact 召回
   const query = [information_request, ...(technical_terms || [])].filter(Boolean).join(' ');
 
   logger.info(
     {
       projectId: projectId.slice(0, 10),
       query,
+      technical_terms,
     },
     'MCP 查询构建',
   );
@@ -240,12 +241,21 @@ export async function handleCodebaseRetrieval(
   logger.debug('SearchService 初始化完成');
 
   // 6. 执行搜索
-  const contextPack = await service.buildContextPack(query);
+  const contextPack = await service.buildContextPack(query, technical_terms ?? []);
 
   // 详细日志：seeds 信息
   if (contextPack.seeds.length > 0) {
     logger.info(
       {
+        exactSeedCount: contextPack.debug?.exactSeedCount ?? contextPack.seeds.filter((s) => s.source === 'exact').length,
+        lexicalSeedCount: contextPack.seeds.filter((s) => s.source === 'lexical').length,
+        vectorSeedCount: contextPack.seeds.filter((s) => s.source === 'vector').length,
+        exactCandidateCount: contextPack.debug?.exactCandidateCount,
+        exactScanChunkCount: contextPack.debug?.exactScanChunkCount,
+        exactScanElapsedMs: contextPack.debug?.exactScanElapsedMs,
+        exactHitsTruncated: contextPack.debug?.exactHitsTruncated,
+        missingExactTechnicalTerms: contextPack.missingExactTechnicalTerms,
+        skippedTechnicalTerms: contextPack.debug?.skippedTechnicalTerms,
         seeds: contextPack.seeds.map((s) => ({
           file: s.filePath,
           chunk: s.chunkIndex,
@@ -287,6 +297,13 @@ export async function handleCodebaseRetrieval(
         lines: f.segments.map((s) => `L${s.startLine}-${s.endLine}`),
       })),
       timingMs: contextPack.debug?.timingMs,
+      exactSeedCount: contextPack.debug?.exactSeedCount,
+      exactCandidateCount: contextPack.debug?.exactCandidateCount,
+      exactScanChunkCount: contextPack.debug?.exactScanChunkCount,
+      exactScanElapsedMs: contextPack.debug?.exactScanElapsedMs,
+      exactHitsTruncated: contextPack.debug?.exactHitsTruncated,
+      missingExactTechnicalTerms: contextPack.missingExactTechnicalTerms,
+      skippedTechnicalTerms: contextPack.debug?.skippedTechnicalTerms,
     },
     'MCP codebase-retrieval 完成',
   );
@@ -340,12 +357,57 @@ function formatMcpResponse(pack: ContextPack): { content: Array<{ type: 'text'; 
     })
     .join('\n\n---\n\n');
 
+  const missingTermsLine =
+    pack.missingExactTechnicalTerms && pack.missingExactTechnicalTerms.length > 0
+      ? `Missing exact technical terms: ${pack.missingExactTechnicalTerms.join(', ')}`
+      : undefined;
+
+  const exactDebug = pack.debug;
+  const skippedTerms = exactDebug?.skippedTechnicalTerms ?? [];
+  const hasExactDebug =
+    exactDebug !== undefined &&
+    ((exactDebug.exactSeedCount ?? 0) > 0 ||
+      (exactDebug.exactCandidateCount ?? 0) > 0 ||
+      (exactDebug.exactScanChunkCount ?? 0) > 0 ||
+      exactDebug.exactHitsTruncated === true ||
+      (pack.missingExactTechnicalTerms?.length ?? 0) > 0 ||
+      skippedTerms.length > 0);
+  const exactSummaryItems =
+    exactDebug && hasExactDebug
+      ? [
+          typeof exactDebug.exactSeedCount === 'number'
+            ? `seeds=${exactDebug.exactSeedCount}`
+            : undefined,
+          typeof exactDebug.exactCandidateCount === 'number'
+            ? `candidates=${exactDebug.exactCandidateCount}`
+            : undefined,
+          typeof exactDebug.exactScanChunkCount === 'number'
+            ? `scanned=${exactDebug.exactScanChunkCount}`
+            : undefined,
+          typeof exactDebug.exactScanElapsedMs === 'number'
+            ? `elapsed=${exactDebug.exactScanElapsedMs}ms`
+            : undefined,
+          typeof exactDebug.exactHitsTruncated === 'boolean'
+            ? `truncated=${exactDebug.exactHitsTruncated}`
+            : undefined,
+        ].filter(Boolean)
+      : [];
+  const exactSummaryLine =
+    exactSummaryItems.length > 0 ? `Exact: ${exactSummaryItems.join(', ')}` : undefined;
+  const skippedTermsLine =
+    skippedTerms.length > 0 ? `Skipped exact technical terms: ${skippedTerms.join(', ')}` : undefined;
+
   // 构建摘要
   const summary = [
     `Found ${seeds.length} relevant code blocks`,
     `Files: ${files.length}`,
     `Total segments: ${files.reduce((acc, f) => acc + f.segments.length, 0)}`,
-  ].join(' | ');
+    missingTermsLine,
+    exactSummaryLine,
+    skippedTermsLine,
+  ]
+    .filter(Boolean)
+    .join(' | ');
 
   const text = `${summary}\n\n${fileBlocks}`;
 

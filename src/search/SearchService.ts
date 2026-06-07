@@ -14,7 +14,7 @@ import { getEmbeddingConfig } from '../config.js';
 import { initDb } from '../db/index.js';
 import { getIndexer, type Indexer } from '../indexer/index.js';
 import { isDebugEnabled, logger } from '../utils/logger.js';
-import type { SearchResult as VectorSearchResult } from '../vectorStore/index.js';
+import type { ChunkRecord, SearchResult as VectorSearchResult } from '../vectorStore/index.js';
 import { getVectorStore, type VectorStore } from '../vectorStore/index.js';
 import { ContextPacker } from './ContextPacker.js';
 import { DEFAULT_CONFIG } from './config.js';
@@ -25,6 +25,8 @@ import {
   searchFilesFts,
   segmentQuery,
 } from './fts.js';
+import { searchExactIndex } from './exactIndex.js';
+import { type ExactTechnicalTermResult } from './exactTechnicalTerms.js';
 import { getGraphExpander } from './GraphExpander.js';
 import type { ContextPack, ScoredChunk, SearchConfig } from './types.js';
 
@@ -74,12 +76,14 @@ export class SearchService {
   /**
    * 构建上下文包（用于问答/生成）
    */
-  async buildContextPack(query: string): Promise<ContextPack> {
+  async buildContextPack(query: string, technicalTerms: string[] = []): Promise<ContextPack> {
     const timingMs: Record<string, number> = {};
     let t0 = Date.now();
 
-    // 1. 混合召回
-    const candidates = await this.hybridRetrieve(query);
+    // 1. 混合召回：query 保留调用方既有语义/词法内容，technical_terms 非空时额外走独立 exact 召回
+    const exactRetrieval = await this.exactRetrieveTechnicalTerms(technicalTerms);
+    const exactReservedSeeds = exactRetrieval.results.slice(0, this.config.exactReservedSeeds);
+    const candidates = await this.hybridRetrieve(query, exactReservedSeeds);
     timingMs.retrieve = Date.now() - t0;
 
     // 2. 取 topM
@@ -90,14 +94,16 @@ export class SearchService {
     const reranked = await this.rerank(query, topM);
     timingMs.rerank = Date.now() - t0;
 
-    // 4. Smart TopK Cutoff
+    // 4. Smart TopK Cutoff，并为 exact 命中保留有限 seed 名额
     t0 = Date.now();
-    const seeds = this.applySmartCutoff(reranked);
+    const seeds = this.limitExactSeeds(
+      this.dedupChunks([...exactReservedSeeds, ...this.applySmartCutoff(reranked)]),
+    );
     timingMs.smartCutoff = Date.now() - t0;
 
     // 5. 扩展（Phase 2 实现）
     t0 = Date.now();
-    const queryTokens = this.extractQueryTokens(query);
+    const queryTokens = this.extractQueryTokens([query, ...technicalTerms].filter(Boolean).join(' '));
     const expanded = await this.expand(seeds, queryTokens);
     timingMs.expand = Date.now() - t0;
 
@@ -107,15 +113,25 @@ export class SearchService {
     const files = await packer.pack([...seeds, ...expanded]);
     timingMs.pack = Date.now() - t0;
 
+    const exactSeedCount = seeds.filter((seed) => seed.source === 'exact').length;
+
     return {
       query,
       seeds,
       expanded,
       files,
+      missingExactTechnicalTerms: exactRetrieval.missingExactTechnicalTerms,
       debug: {
         wVec: this.config.wVec,
         wLex: this.config.wLex,
         timingMs,
+        exactSeedCount,
+        exactCandidateCount: exactRetrieval.results.length,
+        exactScanChunkCount: exactRetrieval.exactScanChunkCount,
+        exactScanElapsedMs: exactRetrieval.exactScanElapsedMs,
+        exactHitsTruncated: exactRetrieval.exactHitsTruncated,
+        exactSearchSource: exactRetrieval.exactSearchSource,
+        skippedTechnicalTerms: exactRetrieval.skippedTechnicalTerms,
       },
     };
   }
@@ -125,8 +141,11 @@ export class SearchService {
   /**
    * 混合召回：向量 + 词法
    */
-  private async hybridRetrieve(query: string): Promise<ScoredChunk[]> {
-    // 并行执行向量和词法召回
+  private async hybridRetrieve(
+    query: string,
+    exactResults: ScoredChunk[] = [],
+  ): Promise<ScoredChunk[]> {
+    // 并行执行向量和词法召回；technical_terms exact 召回由调用方独立传入
     const [vectorResults, lexicalResults] = await Promise.all([
       this.vectorRetrieve(query),
       this.lexicalRetrieve(query),
@@ -136,17 +155,12 @@ export class SearchService {
       {
         vectorCount: vectorResults.length,
         lexicalCount: lexicalResults.length,
+        exactCount: exactResults.length,
       },
       '混合召回完成',
     );
 
-    // 如果词法召回没有结果，直接返回向量结果
-    if (lexicalResults.length === 0) {
-      return vectorResults;
-    }
-
-    // RRF 融合
-    return this.fuse(vectorResults, lexicalResults);
+    return this.fuse(vectorResults, lexicalResults, exactResults);
   }
 
   /**
@@ -352,6 +366,72 @@ export class SearchService {
   }
 
   /**
+   * technical_terms fixed-string exact 召回。
+   *
+   * - technical_terms 非空时才执行
+   * - 不依赖 FTS tokenizer
+   * - 不使用 regex
+   * - 不拆分 term，只有 raw_code / display_code / content 真实包含完整 term 才算 exact
+   */
+  private async exactRetrieveTechnicalTerms(technicalTerms: string[]): Promise<
+    ExactTechnicalTermResult<ChunkRecord> & { results: ScoredChunk[] }
+  > {
+    const emptyResult: ExactTechnicalTermResult<ChunkRecord> & { results: ScoredChunk[] } = {
+      terms: [],
+      skippedTechnicalTerms: [],
+      matches: [],
+      missingExactTechnicalTerms: [],
+      exactScanChunkCount: 0,
+      exactScanElapsedMs: 0,
+      exactHitsTruncated: false,
+      exactSearchSource: [],
+      results: [],
+    };
+
+    if (!this.db || technicalTerms.length === 0) {
+      return emptyResult;
+    }
+
+    const exactMatches = searchExactIndex(this.db, this.projectId, technicalTerms, {
+      exactMaxTerms: this.config.exactMaxTerms,
+      exactMinTermLength: this.config.exactMinTermLength,
+      exactMaxCandidatesPerTerm: this.config.exactMaxCandidatesPerTerm,
+      exactMaxHits: this.config.exactMaxHits,
+    });
+    const matches = exactMatches.hits.map((hit) => ({
+      chunk: hit.chunk,
+      matchedTerms: hit.matchedTerms,
+    }));
+    const results = matches
+      .map(({ chunk, matchedTerms }) => ({
+        filePath: chunk.file_path,
+        chunkIndex: chunk.chunk_index,
+        score: 1 + matchedTerms.length,
+        source: 'exact' as const,
+        record: { ...chunk, _distance: 0 },
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map((chunk, rank) => ({ ...chunk, _rank: rank }));
+
+    logger.debug(
+      {
+        technicalTermCount: exactMatches.terms.length,
+        exactCandidateCount: results.length,
+        exactScanChunkCount: exactMatches.exactScanChunkCount,
+        exactScanElapsedMs: exactMatches.exactScanElapsedMs,
+        exactHitsTruncated: exactMatches.exactHitsTruncated,
+        missingExactTechnicalTerms: exactMatches.missingExactTechnicalTerms,
+        skippedTechnicalTerms: exactMatches.skippedTechnicalTerms,
+        exactSearchSource: exactMatches.exactSearchSource,
+      },
+      'technical_terms exact 召回完成',
+    );
+
+    return { ...exactMatches, matches, results };
+  }
+
+
+  /**
    * 提取查询中的 tokens
    *
    * 直接复用 fts.ts 中的 segmentQuery，确保召回和评分逻辑一致
@@ -404,6 +484,7 @@ export class SearchService {
   private fuse(
     vectorResults: (ScoredChunk & { _rank?: number })[],
     lexicalResults: (ScoredChunk & { _rank?: number })[],
+    exactResults: (ScoredChunk & { _rank?: number })[] = [],
   ): ScoredChunk[] {
     const { rrfK0, wVec, wLex } = this.config;
 
@@ -458,12 +539,34 @@ export class SearchService {
       }
     }
 
+    // 处理 exact 结果：fixed-string 命中直接进入 candidates，并保留 exact 来源
+    for (const result of exactResults) {
+      const key = getKey(result);
+      const exactScore = result.score;
+
+      const existing = fusedScores.get(key);
+      if (existing) {
+        existing.score += exactScore;
+        existing.sources.add('exact');
+      } else {
+        fusedScores.set(key, {
+          score: exactScore,
+          chunk: result,
+          sources: new Set(['exact']),
+        });
+      }
+    }
+
     // 转换为数组并按融合分数排序
     const fused = Array.from(fusedScores.values())
       .map(({ score, chunk, sources }) => ({
         ...chunk,
         score,
-        source: sources.size > 1 ? ('vector' as const) : chunk.source, // 保留原始来源
+        source: sources.has('exact')
+          ? ('exact' as const)
+          : sources.has('lexical')
+            ? ('lexical' as const)
+            : chunk.source, // 来源优先级：exact > lexical > vector
       }))
       .sort((a, b) => b.score - a.score);
 
@@ -655,6 +758,25 @@ export class SearchService {
     return out;
   }
 
+  /**
+   * 对最终 seeds 中的 exact 来源数量做硬上限，避免 exact 候选挤掉其他召回结果。
+   */
+  private limitExactSeeds(list: ScoredChunk[]): ScoredChunk[] {
+    let exactCount = 0;
+    const out: ScoredChunk[] = [];
+
+    for (const chunk of list) {
+      if (chunk.source === 'exact') {
+        if (exactCount >= this.config.exactReservedSeeds) continue;
+        exactCount++;
+      }
+      out.push(chunk);
+    }
+
+    return out;
+  }
+
+
   // 扩展方法
 
   /**
@@ -708,7 +830,6 @@ export class SearchService {
     if (text.length <= maxLen) return text;
 
     const lines = text.split('\n');
-    const _textLower = text.toLowerCase();
 
     // 找命中行（包含任意 query token 的行）
     let hitLineIdx = -1;

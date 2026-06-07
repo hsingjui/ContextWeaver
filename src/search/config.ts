@@ -2,6 +2,13 @@
  * 搜索模块默认配置
  */
 
+import {
+  EXACT_MAX_CANDIDATES_PER_TERM,
+  EXACT_MAX_HITS,
+  EXACT_MAX_TERMS,
+  EXACT_MIN_TERM_LENGTH,
+  EXACT_RESERVED_SEEDS,
+} from './exactTechnicalTerms.js';
 import type { SearchConfig } from './types.js';
 
 export const DEFAULT_CONFIG: SearchConfig = {
@@ -37,6 +44,13 @@ export const DEFAULT_CONFIG: SearchConfig = {
   // ContextPacker
   maxSegmentsPerFile: 3,
   maxTotalChars: 48000,
+
+  // Exact substring retrieval
+  exactMaxTerms: EXACT_MAX_TERMS,
+  exactMinTermLength: EXACT_MIN_TERM_LENGTH,
+  exactMaxCandidatesPerTerm: EXACT_MAX_CANDIDATES_PER_TERM,
+  exactMaxHits: EXACT_MAX_HITS,
+  exactReservedSeeds: EXACT_RESERVED_SEEDS,
 
   // Smart TopK
   enableSmartTopK: true,

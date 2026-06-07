@@ -43,6 +43,13 @@ export interface SearchConfig {
   maxSegmentsPerFile: number;
   maxTotalChars: number;
 
+  // Exact substring retrieval
+  exactMaxTerms: number;
+  exactMinTermLength: number;
+  exactMaxCandidatesPerTerm: number;
+  exactMaxHits: number;
+  exactReservedSeeds: number;
+
   // === Smart TopK ===
   /** 是否启用智能 TopK 策略 */
   enableSmartTopK: boolean;
@@ -85,7 +92,7 @@ export interface SearchConfig {
 // ===========================================
 
 /** Chunk 来源类型 */
-export type ChunkSource = 'vector' | 'lexical' | 'neighbor' | 'breadcrumb' | 'import';
+export type ChunkSource = 'vector' | 'lexical' | 'exact' | 'neighbor' | 'breadcrumb' | 'import';
 
 /** 带得分的 Chunk */
 export interface ScoredChunk {
@@ -134,10 +141,19 @@ export interface ContextPack {
     filePath: string;
     segments: Segment[];
   }>;
+  /** technical_terms 中未在 raw/display/content 中 fixed-string 命中的术语 */
+  missingExactTechnicalTerms?: string[];
   /** 调试信息 */
   debug?: {
     wVec: number;
     wLex: number;
     timingMs: Record<string, number>;
+    exactSeedCount?: number;
+    exactCandidateCount?: number;
+    exactScanChunkCount?: number;
+    exactScanElapsedMs?: number;
+    exactHitsTruncated?: boolean;
+    exactSearchSource?: string[];
+    skippedTechnicalTerms?: string[];
   };
 }
