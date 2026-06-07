@@ -1,0 +1,13 @@
+﻿onlyBuiltDependencies:
+  - "@keqingmoe/tree-sitter"
+  - better-sqlite3
+  - esbuild
+  - tree-sitter-c-sharp
+  - tree-sitter-c
+  - tree-sitter-cpp
+  - tree-sitter-go
+  - tree-sitter-java
+  - tree-sitter-javascript
+  - tree-sitter-python
+  - tree-sitter-rust
+  - tree-sitter-typescript
