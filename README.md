@@ -61,6 +61,9 @@ npm install -g @hsingjui/contextweaver
 pnpm add -g @hsingjui/contextweaver
 ```
 
+> 如果你从源码修改 ContextWeaver，请注意全局安装的 `contextweaver` 命令可能仍指向 npm 包版本；本地源码改动需要重新 build/link/install 后才会影响全局 CLI。
+
+
 ### 初始化配置
 
 ```bash
@@ -98,6 +101,25 @@ RERANK_TOP_N=20
 # IGNORE_PATTERNS=.venv,node_modules
 ```
 
+#### Voyage Embeddings 说明
+
+- 使用 Voyage provider 时可设置 `EMBEDDINGS_PROVIDER=voyage`，并将 `EMBEDDINGS_BASE_URL` 设为 `https://api.voyageai.com/v1/embeddings`。
+- `EMBEDDINGS_MODEL` 可按需配置，`voyage-code-3` 只是示例模型名。
+- `EMBEDDINGS_DIMENSIONS` 表示本地向量库维度，必须与最终返回向量维度一致。
+- `EMBEDDINGS_OUTPUT_DIMENSION` 是 Voyage API 的可选输出维度；不配置时使用 Voyage 模型默认维度。
+- `EMBEDDINGS_OUTPUT_DTYPE` 是 Voyage API 的可选输出类型，默认 `float`。
+- Voyage 索引时使用 `input_type=document`，查询时使用 `input_type=query`。
+- OpenAI-compatible / SiliconFlow provider 使用 `encoding_format=float`。
+
+#### IGNORE_PATTERNS 说明
+
+```bash
+IGNORE_PATTERNS=node_modules,dist,build,target,.git,.venv
+```
+
+建议忽略生成物、缓存目录和大型二进制目录，避免索引无关内容并提升性能。注意 junction、symlink 或 workspace 挂载目录不一定都会被扫描；如遇缺失，请改用实际源码目录，或将 workspace 复制到普通目录后再索引。
+
+
 ### 索引代码库
 
 ```bash
@@ -111,6 +133,9 @@ contextweaver index /path/to/your/project
 contextweaver index --force
 ```
 
+> 更换 Embedding provider、模型、输出维度或 `EMBEDDINGS_OUTPUT_DTYPE` 后，旧向量索引不再兼容，请执行 `contextweaver index --force` 重建索引。`--force` 也会清理当前 project 的 exact index；exact index 按 `project_id` 隔离，用于 `technical_terms` fixed-string 精确召回。
+
+
 ### 本地搜索
 
 ```bash
@@ -120,6 +145,22 @@ cw search --information-request "用户认证流程是如何实现的？"
 # 带精确术语
 cw search --information-request "数据库连接逻辑" --technical-terms "DatabasePool,Connection"
 ```
+
+#### technical_terms 精确召回
+
+`technical_terms` 不只是拼接到语义 query 中，还会额外触发 fixed-string exact retrieval，用于召回包含完整技术术语的代码片段：
+
+- 支持 `@ControllerAdvice`、`R.failed`、`useQuery()` 等包含符号的完整术语。
+- 不依赖 FTS tokenizer，不使用 regex，也不会拆分 term。
+- `missingExactTechnicalTerms` 表示本次 exact retrieval 未在候选中命中的术语，便于判断是否需要换词或扩大检索范围。
+- exact retrieval 设有 cap，用于限制候选数量和扫描成本，避免在大仓库中造成性能问题。
+
+PowerShell 中 `technical_terms` 可使用逗号分隔：
+
+```powershell
+contextweaver search --information-request "错误处理逻辑" --technical-terms "R.failed,e.getMessage,catch"
+```
+
 
 ### 启动 MCP 服务器
 
@@ -156,6 +197,25 @@ ContextWeaver 提供一个核心 MCP 工具：`codebase-retrieval`
 | `repo_path` | string | ✅ | 代码库根目录的绝对路径 |
 | `information_request` | string | ✅ | 自然语言形式的语义意图描述 |
 | `technical_terms` | string[] | ❌ | 精确技术术语（类名、函数名等） |
+
+#### MCP technical_terms 示例
+
+MCP 调用时 `technical_terms` 使用 JSON array：
+
+```json
+{
+  "repo_path": "d:/code/your-project",
+  "information_request": "错误处理逻辑",
+  "technical_terms": ["R.failed", "e.getMessage", "catch"]
+}
+```
+
+响应摘要中：
+
+- `Missing exact technical terms`：exact retrieval 未命中的 technical terms。
+- `Exact: seeds=..., candidates=..., scanned=..., elapsed=..., truncated=...`：exact retrieval 的种子数量、候选数量、扫描数量、耗时和是否因 cap 截断。
+- `Skipped exact technical terms`：被跳过的术语，通常是空值、重复值或超出限制的输入。
+
 
 #### 设计理念
 
@@ -210,7 +270,7 @@ flowchart TB
 | **GraphExpander** | 上下文扩展器，执行 E1/E2/E3 三阶段扩展策略 |
 | **ContextPacker** | 上下文打包器，负责段落合并和 Token 预算控制 |
 | **VectorStore** | LanceDB 适配层，管理向量索引的增删改查 |
-| **SQLite (FTS5)** | 元数据存储 + 全文搜索索引 |
+| **SQLite (FTS5 + Exact)** | 元数据存储 + 全文搜索索引；同时使用现有 SQLite / better-sqlite3 维护按 `project_id` 隔离的 exact substring index，用于 `technical_terms` fixed-string 精确召回（无需额外安装数据库） |
 | **SemanticSplitter** | AST 语义分片器，基于 Tree-sitter 解析 |
 
 ## 📁 项目结构
