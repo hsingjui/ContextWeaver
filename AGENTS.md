@@ -32,7 +32,7 @@ contextweaver mcp             # 启动 MCP 服务端
 
 ```
 索引: Crawler → Processor → SemanticSplitter → Indexer → VectorStore/SQLite
-搜索: Query → Vector+FTS Recall → RRF Fusion → Rerank → GraphExpander → ContextPacker
+搜索: Query → Vector+FTS+Exact Recall → RRF Fusion → Rerank → GraphExpander → ContextPacker
 ```
 
 ### Key Modules
@@ -44,8 +44,11 @@ contextweaver mcp             # 启动 MCP 服务端
 | **ContextPacker** | `src/search/ContextPacker.ts` | 段落合并和 Token 预算控制 |
 | **SemanticSplitter** | `src/chunking/SemanticSplitter.ts` | AST 语义分片器 (Tree-sitter) |
 | **VectorStore** | `src/vectorStore/index.ts` | LanceDB 适配层 |
-| **Database** | `src/db/index.ts` | SQLite + FTS5 元数据和全文索引 |
+| **Database** | `src/db/index.ts` | SQLite + FTS5 元数据和全文索引；另维护按 `project_id` 隔离的 exact substring index |
 | **MCP Server** | `src/mcp/server.ts` | Model Context Protocol 服务端实现 |
+
+
+Note: `technical_terms` 会触发 fixed-string exact retrieval，用于匹配包含 `@`、`.`、`()` 等符号的完整术语。
 
 ### Import Resolvers
 
