@@ -14,6 +14,11 @@ import type { ProcessedChunk } from '../chunking/types.js';
 import { batchUpdateVectorIndexHash, clearVectorIndexHash } from '../db/index.js';
 import type { ProcessResult } from '../scanner/processor.js';
 import {
+  batchDeleteExactIndex,
+  batchUpsertExactIndex,
+  type ExactIndexChunkInput,
+} from '../search/exactIndex.js';
+import {
   batchDeleteFileChunksFts,
   batchUpsertChunkFts,
   isChunksFtsInitialized,
@@ -37,6 +42,7 @@ export interface IndexStats {
 interface FileToIndex {
   path: string;
   hash: string;
+  content: string;
   chunks: ProcessedChunk[];
 }
 
@@ -99,6 +105,7 @@ export class Indexer {
             toIndex.push({
               path: result.relPath,
               hash: result.hash,
+              content: result.content ?? '',
               chunks: result.chunks,
             });
           } else {
@@ -231,7 +238,7 @@ export class Indexer {
       breadcrumb: string;
       content: string;
     }> = [];
-    const successFiles: Array<{ path: string; hash: string }> = [];
+    const allExactChunks: ExactIndexChunkInput[] = [];
     const errorFiles: string[] = [];
 
     for (let fileIdx = 0; fileIdx < files.length; fileIdx++) {
@@ -276,10 +283,24 @@ export class Indexer {
             breadcrumb: record.breadcrumb,
             content: `${record.breadcrumb}\n${record.display_code}`,
           });
+
+
+          // 收集 fixed-string exact substring 索引数据（raw content + display content）
+          allExactChunks.push({
+            chunkId: record.chunk_id,
+            filePath: record.file_path,
+            fileHash: record.file_hash,
+            chunkIndex: record.chunk_index,
+            startLine: lineNumberAtOffset(file.content, record.raw_start),
+            endLine: lineNumberAtOffset(file.content, record.raw_end),
+            rawStart: record.raw_start,
+            rawEnd: record.raw_end,
+            content: file.content.slice(record.raw_start, record.raw_end),
+            displayCode: record.display_code,
+          });
         }
 
         filesToUpsert.push({ path: file.path, hash: file.hash, records });
-        successFiles.push({ path: file.path, hash: file.hash });
       } catch (err) {
         const error = err as { message?: string; stack?: string };
         logger.error(
@@ -328,15 +349,41 @@ export class Indexer {
       }
     }
 
-    // ===== 阶段 6: 更新 SQLite 元数据 =====
-    if (successFiles.length > 0) {
-      batchUpdateVectorIndexHash(db, successFiles);
+
+    // ===== 阶段 6: 批量更新 fixed-string exact substring 索引 =====
+    if (allExactChunks.length > 0) {
+      try {
+        const pathsToDelete = filesToUpsert.map((f) => f.path);
+        batchDeleteExactIndex(db, this.projectId, pathsToDelete);
+        batchUpsertExactIndex(db, this.projectId, allExactChunks);
+        logger.info(
+          { files: pathsToDelete.length, chunks: allExactChunks.length },
+          'Exact substring 索引批量更新完成',
+        );
+      } catch (err) {
+        const error = err as { message?: string; stack?: string };
+        logger.error(
+          { error: error.message, stack: error.stack },
+          'Exact substring 索引批量更新失败，本批文件不会标记为已索引',
+        );
+        clearVectorIndexHash(
+          db,
+          filesToUpsert.map((f) => f.path),
+        );
+        return { success: 0, errors: filesToUpsert.length + errorFiles.length };
+      }
+    }
+
+    // ===== 阶段 7: 更新 SQLite 元数据 =====
+    if (filesToUpsert.length > 0) {
+      batchUpdateVectorIndexHash(db, filesToUpsert.map(({ path, hash }) => ({ path, hash })));
     }
 
     // 汇总日志
-    logger.info({ success: successFiles.length, errors: errorFiles.length }, '批量索引完成');
+    logger.info({ success: filesToUpsert.length, errors: errorFiles.length }, '批量索引完成');
 
-    return { success: successFiles.length, errors: errorFiles.length };
+
+    return { success: filesToUpsert.length, errors: errorFiles.length };
   }
 
   /**
@@ -352,6 +399,9 @@ export class Indexer {
     if (isChunksFtsInitialized(db)) {
       batchDeleteFileChunksFts(db, paths);
     }
+
+    // 删除 fixed-string exact substring 索引
+    batchDeleteExactIndex(db, this.projectId, paths);
 
     logger.debug({ count: paths.length }, '删除文件索引');
   }
@@ -405,6 +455,16 @@ const indexers = new Map<string, Indexer>();
 /**
  * 获取或创建 Indexer 实例
  */
+
+
+function lineNumberAtOffset(content: string, offset: number): number {
+  let line = 1;
+  const end = Math.max(0, Math.min(offset, content.length));
+  for (let i = 0; i < end; i++) {
+    if (content.charCodeAt(i) === 10) line++;
+  }
+  return line;
+}
 export async function getIndexer(projectId: string, vectorDim = 1024): Promise<Indexer> {
   let indexer = indexers.get(projectId);
   if (!indexer) {

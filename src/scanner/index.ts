@@ -16,6 +16,7 @@ import {
   setStoredEmbeddingDimensions,
 } from '../db/index.js';
 import { closeAllIndexers, getIndexer } from '../indexer/index.js';
+import { clearProjectExactIndex } from '../search/exactIndex.js';
 import { logger } from '../utils/logger.js';
 import { closeAllVectorStores } from '../vectorStore/index.js';
 import { crawl } from './crawler.js';
@@ -94,9 +95,10 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
       setStoredEmbeddingDimensions(db, currentDimensions);
     }
 
-    // 如果强制重新索引，清空数据库和向量索引
+    // 如果强制重新索引，清空数据库、当前项目 exact 索引和向量索引
     if (forceReindex) {
       clear(db);
+      clearProjectExactIndex(db, projectId);
 
       // 清空向量索引
       if (options.vectorIndex !== false) {

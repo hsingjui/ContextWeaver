@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { initExactIndex } from '../search/exactIndex.js';
 import {
   batchDeleteFileFts,
   batchUpsertFileFts,
@@ -123,6 +124,9 @@ export function initDb(projectId: string): Database.Database {
   // 初始化 FTS 表（词法搜索支持）
   initFilesFts(db);
   initChunksFts(db);
+
+  // 初始化 fixed-string exact substring 索引
+  initExactIndex(db);
 
   return db;
 }
