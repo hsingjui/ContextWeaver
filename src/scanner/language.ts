@@ -3,6 +3,8 @@
  */
 const LANGUAGE_MAP: Record<string, string> = {
   '.ts': 'typescript',
+  '.mts': 'typescript',
+  '.cts': 'typescript',
   '.tsx': 'typescript',
   '.js': 'javascript',
   '.jsx': 'javascript',
@@ -21,6 +23,7 @@ const LANGUAGE_MAP: Record<string, string> = {
   '.hpp': 'cpp',
   '.h': 'cpp',
   '.c': 'c',
+  '.cs': 'c_sharp',
   '.sh': 'shell',
   '.bash': 'shell',
   '.zsh': 'shell',
@@ -77,6 +80,7 @@ export function isAllowedExtension(filePath: string): boolean {
  * @returns 扩展名，如 ".ts"
  */
 function getFileExtension(filePath: string): string {
-  const ext = filePath.split('.').pop();
-  return ext ? `.${ext.toLowerCase()}` : '';
+  const filename = filePath.slice(filePath.lastIndexOf('/') + 1);
+  const dot = filename.lastIndexOf('.');
+  return dot > 0 ? filename.slice(dot).toLowerCase() : '';
 }

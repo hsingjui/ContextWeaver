@@ -120,12 +120,33 @@ export function initDb(projectId: string): Database.Database {
     )
   `);
 
+  // 文件删除的重试依据，必须在派生索引清理成功前保留。
+  db.exec('CREATE TABLE IF NOT EXISTS pending_deletions (path TEXT PRIMARY KEY)');
+
   // 初始化 FTS 表（词法搜索支持）
   initFilesFts(db);
   initChunksFts(db);
 
   return db;
 }
+
+const sharedDbs = new Map<string, Database.Database>();
+
+/** 搜索组件共享连接；扫描仍使用独立连接并自行关闭。 */
+export function getSharedDb(projectId: string): Database.Database {
+  let db = sharedDbs.get(projectId);
+  if (!db?.open) {
+    db = initDb(projectId);
+    sharedDbs.set(projectId, db);
+  }
+  return db;
+}
+
+process.once('exit', () => {
+  for (const db of sharedDbs.values()) {
+    if (db.open) db.close();
+  }
+});
 
 /**
  * 关闭数据库连接
@@ -211,6 +232,7 @@ export function clearVectorIndexHash(db: Database.Database, paths: string[]): vo
  * 批量插入/更新文件记录
  */
 export function batchUpsert(db: Database.Database, files: FileMeta[]): void {
+  if (files.length === 0) return;
   const insert = db.prepare(`
     INSERT INTO files (path, hash, mtime, size, content, language)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -219,7 +241,8 @@ export function batchUpsert(db: Database.Database, files: FileMeta[]): void {
       mtime = excluded.mtime,
       size = excluded.size,
       content = excluded.content,
-      language = excluded.language
+      language = excluded.language,
+      vector_index_hash = NULL
   `);
 
   const transaction = db.transaction((items: FileMeta[]) => {
@@ -227,8 +250,6 @@ export function batchUpsert(db: Database.Database, files: FileMeta[]): void {
       insert.run(item.path, item.hash, item.mtime, item.size, item.content, item.language);
     }
   });
-
-  transaction(files);
 
   // 同步 FTS 索引
   // 使用类型守卫过滤 null，TypeScript 可以正确推断类型
@@ -238,23 +259,30 @@ export function batchUpsert(db: Database.Database, files: FileMeta[]): void {
       ftsFiles.push({ path: f.path, content: f.content });
     }
   }
-  if (ftsFiles.length > 0) {
-    batchUpsertFileFts(db, ftsFiles);
-  }
+  db.transaction(() => {
+    transaction(files);
+    batchDeleteFileFts(
+      db,
+      files.filter((file) => file.content === null).map((file) => file.path),
+    );
+    if (ftsFiles.length > 0) batchUpsertFileFts(db, ftsFiles);
+  })();
 }
 
 /**
- * 批量更新 mtime
+ * 批量更新 mtime 和 size
  */
 export function batchUpdateMtime(
   db: Database.Database,
-  items: Array<{ path: string; mtime: number }>,
+  items: Array<{ path: string; mtime: number; size: number }>,
 ): void {
-  const update = db.prepare('UPDATE files SET mtime = ? WHERE path = ?');
+  if (items.length === 0) return;
+  const update = db.prepare(`UPDATE files SET mtime = ?, size = ?
+    WHERE path = ? AND (mtime != ? OR size != ?)`);
 
-  const transaction = db.transaction((data: Array<{ path: string; mtime: number }>) => {
+  const transaction = db.transaction((data: typeof items) => {
     for (const item of data) {
-      update.run(item.mtime, item.path);
+      update.run(item.mtime, item.size, item.path, item.mtime, item.size);
     }
   });
 
@@ -273,27 +301,51 @@ export function getAllPaths(db: Database.Database): string[] {
  * 批量删除文件
  */
 export function batchDelete(db: Database.Database, paths: string[]): void {
+  if (paths.length === 0) return;
   const stmt = db.prepare('DELETE FROM files WHERE path = ?');
-
-  const transaction = db.transaction((items: string[]) => {
-    for (const item of items) {
-      stmt.run(item);
+  const pending = db.prepare('INSERT OR IGNORE INTO pending_deletions(path) VALUES (?)');
+  db.transaction(() => {
+    for (const filePath of paths) {
+      pending.run(filePath);
+      stmt.run(filePath);
     }
-  });
-
-  transaction(paths);
-
-  // 同步删除 FTS 索引
-  if (paths.length > 0) {
     batchDeleteFileFts(db, paths);
-  }
+  })();
+}
+
+export function getPendingDeletions(db: Database.Database): string[] {
+  return (db.prepare('SELECT path FROM pending_deletions').all() as Array<{ path: string }>).map(
+    (row) => row.path,
+  );
+}
+
+export function completeDeletions(db: Database.Database, paths: string[]): void {
+  db.prepare('DELETE FROM pending_deletions WHERE path IN (SELECT value FROM json_each(?))').run(
+    JSON.stringify(paths),
+  );
+}
+
+/** 使所有文件的派生索引过期；与配置指纹一起提交，失败后仍能继续补索引。 */
+export function invalidateIndex(db: Database.Database, fingerprint?: string): void {
+  db.transaction(() => {
+    db.exec('UPDATE files SET vector_index_hash = NULL');
+    if (fingerprint !== undefined) setMetadata(db, 'index_fingerprint', fingerprint);
+  })();
+}
+
+export function getStoredIndexFingerprint(db: Database.Database): string | null {
+  return getMetadata(db, 'index_fingerprint');
 }
 
 /**
  * 清空数据库
  */
 export function clear(db: Database.Database): void {
-  db.exec('DELETE FROM files');
+  db.transaction(() => {
+    db.exec(
+      'DELETE FROM files; DELETE FROM files_fts; DELETE FROM chunks_fts; DELETE FROM fts_short_tokens; DELETE FROM fts_short_records; DELETE FROM fts_short_tokens_meta;',
+    );
+  })();
 }
 
 // ===========================================

@@ -11,7 +11,11 @@
 import type Database from 'better-sqlite3';
 import { type EmbeddingClient, getEmbeddingClient } from '../api/embedding.js';
 import type { ProcessedChunk } from '../chunking/types.js';
-import { batchUpdateVectorIndexHash, clearVectorIndexHash } from '../db/index.js';
+import {
+  batchUpdateVectorIndexHash,
+  clearVectorIndexHash,
+  completeDeletions,
+} from '../db/index.js';
 import type { ProcessResult } from '../scanner/processor.js';
 import {
   batchDeleteFileChunksFts,
@@ -144,10 +148,34 @@ export class Indexer {
     }
 
     // 批量处理需要索引的文件
-    if (toIndex.length > 0) {
-      const indexResult = await this.batchIndex(db, toIndex, onProgress);
-      stats.indexed = indexResult.success;
-      stats.errors = indexResult.errors;
+    // ponytail: 单文件不拆提交；超大文件的内存上限由 MAX_FILE_SIZE_BYTES 控制，必要时再做文件内暂存。
+    const batches: FileToIndex[][] = [];
+    let batch: FileToIndex[] = [];
+    let chunkCount = 0;
+    for (const file of toIndex) {
+      if (batch.length > 0 && (batch.length >= 50 || chunkCount + file.chunks.length > 1000)) {
+        batches.push(batch);
+        batch = [];
+        chunkCount = 0;
+      }
+      batch.push(file);
+      chunkCount += file.chunks.length;
+    }
+    if (batch.length > 0) batches.push(batch);
+
+    const total = batches.reduce(
+      (sum, files) =>
+        sum + Math.ceil(files.reduce((count, file) => count + file.chunks.length, 0) / 20),
+      0,
+    );
+    let completed = 0;
+    for (const files of batches) {
+      const result = await this.batchIndex(db, files, (current) =>
+        onProgress?.(completed + current, total),
+      );
+      stats.indexed += result.success;
+      stats.errors += result.errors;
+      completed += Math.ceil(files.reduce((count, file) => count + file.chunks.length, 0) / 20);
     }
 
     logger.info(
@@ -305,27 +333,23 @@ export class Indexer {
       }
     }
 
-    // ===== 阶段 5: 批量更新 FTS 索引 =====
-    if (isChunksFtsInitialized(db) && allFtsChunks.length > 0) {
-      try {
-        // 批量删除旧 FTS 记录
-        const pathsToDelete = filesToUpsert.map((f) => f.path);
-        batchDeleteFileChunksFts(db, pathsToDelete);
-        // 批量插入新 FTS 记录
-        batchUpsertChunkFts(db, allFtsChunks);
-        logger.info(
-          { files: pathsToDelete.length, chunks: allFtsChunks.length },
-          'FTS 批量更新完成',
+    // FTS 替换和收敛标记同事务提交；失败时保留旧 FTS 并允许下一轮重试。
+    try {
+      db.transaction(() => {
+        batchUpsertChunkFts(
+          db,
+          allFtsChunks,
+          filesToUpsert.map((file) => file.path),
         );
-      } catch (err) {
-        const error = err as { message?: string };
-        logger.warn({ error: error.message }, 'FTS 批量更新失败（向量索引已成功）');
-      }
-    }
-
-    // ===== 阶段 6: 更新 SQLite 元数据 =====
-    if (successFiles.length > 0) {
-      batchUpdateVectorIndexHash(db, successFiles);
+        batchUpdateVectorIndexHash(db, successFiles);
+      })();
+    } catch (err) {
+      logger.error({ error: (err as Error).message }, 'FTS 更新失败，保留待索引状态');
+      clearVectorIndexHash(
+        db,
+        files.map((file) => file.path),
+      );
+      return { success: 0, errors: files.length };
     }
 
     // 汇总日志
@@ -343,10 +367,11 @@ export class Indexer {
     // 删除向量索引
     await this.vectorStore.deleteFiles(paths);
 
-    // 删除 chunk FTS 索引
-    if (isChunksFtsInitialized(db)) {
-      batchDeleteFileChunksFts(db, paths);
-    }
+    // 清理成功后才移除持久化删除标记。
+    db.transaction(() => {
+      if (isChunksFtsInitialized(db)) batchDeleteFileChunksFts(db, paths);
+      completeDeletions(db, paths);
+    })();
 
     logger.debug({ count: paths.length }, '删除文件索引');
   }
@@ -415,4 +440,8 @@ export async function getIndexer(projectId: string, vectorDim = 1024): Promise<I
  */
 export function closeAllIndexers(): void {
   indexers.clear();
+}
+
+export function closeIndexer(projectId: string): void {
+  indexers.delete(projectId);
 }

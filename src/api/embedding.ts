@@ -78,16 +78,15 @@ function extractErrorMessage(payload: unknown): string | null {
   return null;
 }
 
-/** 校验 Embedding API 响应结构 */
+/** 轻量结构校验：只验证顶层形态；向量取值的严格校验由结果循环统一负责 */
 function isEmbeddingResponse(payload: unknown): payload is EmbeddingResponse {
   if (!isRecord(payload) || !Array.isArray(payload.data)) return false;
-  return payload.data.every(
-    (item) =>
-      isRecord(item) &&
-      typeof item.index === 'number' &&
-      Array.isArray(item.embedding) &&
-      item.embedding.every((v) => typeof v === 'number'),
-  );
+  for (const item of payload.data) {
+    if (!isRecord(item) || typeof item.index !== 'number' || !Array.isArray(item.embedding)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -359,6 +358,14 @@ export class EmbeddingClient {
 
   constructor(config?: EmbeddingConfig) {
     this.config = config || getEmbeddingConfig();
+    if (
+      !Number.isSafeInteger(this.config.dimensions) ||
+      this.config.dimensions <= 0 ||
+      !Number.isSafeInteger(this.config.maxConcurrency) ||
+      this.config.maxConcurrency <= 0
+    ) {
+      throw new Error('Embedding dimensions and maxConcurrency must be positive integers');
+    }
     this.rateLimiter = getRateLimitController(this.config.maxConcurrency);
   }
 
@@ -385,12 +392,14 @@ export class EmbeddingClient {
       return [];
     }
 
+    if (!Number.isSafeInteger(batchSize) || batchSize <= 0) {
+      throw new Error('Embedding batchSize must be a positive integer');
+    }
+
     if (!this.config.autoSplitLongText) {
       const batches = this.createBatches(texts, batchSize);
       const progress = new ProgressTracker(batches.length, onProgress);
-      const batchResults = await Promise.all(
-        batches.map((batch) => this.processWithRateLimit(batch.texts, batch.startIndex, progress)),
-      );
+      const batchResults = await this.runBatches(batches, progress);
       progress.complete();
       return batchResults.flat().sort((left, right) => left.index - right.index);
     }
@@ -403,9 +412,7 @@ export class EmbeddingClient {
     const progress = new ProgressTracker(batches.length, onProgress);
 
     // 使用速率限制控制器处理各批次
-    const batchResults = await Promise.all(
-      batches.map((batch) => this.processWithRateLimit(batch.texts, batch.startIndex, progress)),
-    );
+    const batchResults = await this.runBatches(batches, progress);
 
     // 输出完成统计
     progress.complete();
@@ -598,6 +605,38 @@ export class EmbeddingClient {
   }
 
   /**
+   * 只启动有限 worker；失败后停止取新任务，并等待在途请求结束。
+   */
+  private async runBatches(
+    batches: EmbeddingBatch[],
+    progress: ProgressTracker,
+  ): Promise<EmbeddingResult[][]> {
+    const batchResults: EmbeddingResult[][] = new Array(batches.length);
+    let nextBatch = 0;
+    let failed = false;
+    let failure: unknown;
+    await Promise.all(
+      Array.from({ length: Math.min(this.config.maxConcurrency, batches.length) }, async () => {
+        while (!failed && nextBatch < batches.length) {
+          const index = nextBatch++;
+          try {
+            batchResults[index] = await this.processWithRateLimit(
+              batches[index].texts,
+              batches[index].startIndex,
+              progress,
+            );
+          } catch (error) {
+            if (!failed) failure = error;
+            failed = true;
+          }
+        }
+      }),
+    );
+    if (failed) throw failure;
+    return batchResults;
+  }
+
+  /**
    * 带速率限制和错误重试的批次处理
    * 普通重试使用循环；长度错误时走二分递归拆分
    */
@@ -607,9 +646,11 @@ export class EmbeddingClient {
     progress: ProgressTracker,
   ): Promise<EmbeddingResult[]> {
     const MAX_NETWORK_RETRIES = 3;
+    const MAX_RATE_LIMIT_RETRIES = 3;
     const INITIAL_RETRY_DELAY_MS = 1000;
 
     let networkRetries = 0;
+    let rateLimitRetries = 0;
 
     while (true) {
       // 获取执行槽位（可能等待）
@@ -626,11 +667,11 @@ export class EmbeddingClient {
         const isNetworkError = this.isNetworkError(err);
         const isInputTooLong = this.isInputTooLongError(err);
 
-        if (isRateLimited) {
-          // 429 错误：释放槽位，触发全局暂停
+        if (isRateLimited && rateLimitRetries < MAX_RATE_LIMIT_RETRIES) {
+          // 429 错误：有界重试，避免配额耗尽时永久挂起
+          rateLimitRetries++;
           this.rateLimiter.releaseForRetry();
           await this.rateLimiter.triggerRateLimit();
-          networkRetries = 0; // 重置网络重试计数
           // 循环继续，重新获取槽位并重试
         } else if (isInputTooLong) {
           this.rateLimiter.releaseFailure();
@@ -781,6 +822,7 @@ export class EmbeddingClient {
       'socket hang up',
       'network',
       'aborted',
+      'timeout',
     ];
 
     // 检查错误消息
@@ -822,6 +864,7 @@ export class EmbeddingClient {
         Authorization: `Bearer ${this.config.apiKey}`,
       },
       body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(60_000),
     });
 
     const latencyMs = Date.now() - startTime;
@@ -877,17 +920,41 @@ export class EmbeddingClient {
       throw new Error(`Embedding API 错误: 响应结构异常 - ${rawBody}`);
     }
 
-    const results: EmbeddingResult[] = parsedBody.data.map((item) => {
+    const results: EmbeddingResult[] = new Array(texts.length);
+    if (parsedBody.data.length !== texts.length) {
+      throw new Error('Invalid Embedding response: result count mismatch');
+    }
+    for (const item of parsedBody.data) {
+      if (!Number.isInteger(item.index) || item.index < 0 || item.index >= texts.length) {
+        throw new Error(
+          `Invalid Embedding response: index out of range (index=${item.index}, expected=0..${texts.length - 1})`,
+        );
+      }
+      if (results[item.index] !== undefined) {
+        throw new Error(`Invalid Embedding response: duplicate index (index=${item.index})`);
+      }
+      if (item.embedding.length !== this.config.dimensions) {
+        throw new Error(
+          `Invalid Embedding response: vector dimension mismatch (index=${item.index}, expected=${this.config.dimensions}, actual=${item.embedding.length})`,
+        );
+      }
+      for (const value of item.embedding) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+          throw new Error(
+            `Invalid Embedding response: vector contains non-finite value (index=${item.index})`,
+          );
+        }
+      }
       const text = texts[item.index];
       if (typeof text !== 'string') {
-        throw new Error(`Embedding API 错误: 响应索引越界 index=${item.index}`);
+        throw new Error(`Invalid Embedding response: missing input text (index=${item.index})`);
       }
-      return {
+      results[item.index] = {
         text,
         embedding: item.embedding,
         index: startIndex + item.index,
       };
-    });
+    }
 
     // 记录批次完成（进度追踪器会定时输出）
     progress.recordBatch(parsedBody.usage?.total_tokens || 0);
@@ -916,8 +983,9 @@ export class EmbeddingClient {
 let defaultClient: EmbeddingClient | null = null;
 
 export function getEmbeddingClient(): EmbeddingClient {
-  if (!defaultClient) {
-    defaultClient = new EmbeddingClient();
+  const config = getEmbeddingConfig();
+  if (!defaultClient || JSON.stringify(defaultClient.getConfig()) !== JSON.stringify(config)) {
+    defaultClient = new EmbeddingClient(config);
   }
   return defaultClient;
 }

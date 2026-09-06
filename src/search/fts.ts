@@ -4,6 +4,7 @@
  * 基于 SQLite FTS5 实现词法检索能力：
  * - 自动探测 tokenizer 支持（trigram > unicode61）
  * - 初始化和同步 files_fts 表
+ * - 为短 token 维护 SQLite 倒排索引
  * - 提供文件级和 chunk 级搜索接口
  */
 
@@ -17,6 +18,9 @@ type FtsTokenizer = 'trigram' | 'unicode61';
 
 /** 缓存已探测的 tokenizer */
 const tokenizerCache = new WeakMap<Database.Database, FtsTokenizer>();
+
+type ShortTokenKind = 'file' | 'chunk';
+const SHORT_TOKEN_INDEX_VERSION = 5;
 
 /**
  * FTS tokenizer 能力探测
@@ -44,6 +48,266 @@ function detectFtsTokenizer(db: Database.Database): FtsTokenizer {
 
   tokenizerCache.set(db, tokenizer);
   return tokenizer;
+}
+
+/** 短 token 倒排索引；每条记录只保存去重后的单字符和连续汉字二元组。 */
+function ensureShortTokenIndex(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fts_short_tokens (
+      kind TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      token TEXT NOT NULL,
+      PRIMARY KEY (kind, record_id, token)
+    );
+    CREATE INDEX IF NOT EXISTS idx_fts_short_tokens_lookup
+      ON fts_short_tokens(kind, token, record_id);
+    CREATE TABLE IF NOT EXISTS fts_short_records (
+      kind TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      chunk_index INTEGER,
+      source_rowid INTEGER NOT NULL,
+      PRIMARY KEY (kind, record_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_fts_short_records_path
+      ON fts_short_records(kind, file_path);
+    CREATE TABLE IF NOT EXISTS fts_short_tokens_meta (
+      kind TEXT PRIMARY KEY,
+      version INTEGER NOT NULL
+    );
+  `);
+  try {
+    db.exec('ALTER TABLE fts_short_records ADD COLUMN source_rowid INTEGER');
+  } catch {
+    // 列已存在，或表刚按最新 schema 创建。
+  }
+}
+
+/**
+ * 生成可索引的短 token。
+ * token 不跨空白，因此不会改变原 instr() 的匹配语义。
+ */
+function isHan(char: string): boolean {
+  return /^\p{Script=Han}$/u.test(char);
+}
+
+function canUseShortTokenIndex(token: string): boolean {
+  const chars = Array.from(token);
+  return chars.length === 1 || (chars.length === 2 && chars.every(isHan));
+}
+
+function getShortTokens(values: string[]): string[] {
+  const tokens = new Set<string>();
+  for (const value of values) {
+    const chars = Array.from(value.toLowerCase());
+    for (let i = 0; i < chars.length; i++) {
+      if (!/\s/u.test(chars[i])) tokens.add(chars[i]);
+      if (i + 1 < chars.length && isHan(chars[i]) && isHan(chars[i + 1])) {
+        tokens.add(chars[i] + chars[i + 1]);
+      }
+    }
+  }
+  return Array.from(tokens);
+}
+
+/** 重建某一类记录的短 token 索引。 */
+function syncShortTokenIndex(db: Database.Database, kind: ShortTokenKind): void {
+  ensureShortTokenIndex(db);
+  const version = db
+    .prepare('SELECT version FROM fts_short_tokens_meta WHERE kind = ?')
+    .get(kind) as { version: number } | undefined;
+  if (version?.version === SHORT_TOKEN_INDEX_VERSION) return;
+
+  const sources =
+    kind === 'file'
+      ? (
+          db.prepare('SELECT rowid, path, content FROM files_fts').all() as Array<{
+            rowid: number;
+            path: string;
+            content: string | null;
+          }>
+        ).map((row) => ({
+          recordId: row.path,
+          filePath: row.path,
+          chunkIndex: null,
+          sourceRowid: row.rowid,
+          values: [row.path, row.content ?? ''],
+        }))
+      : (
+          db
+            .prepare(
+              'SELECT rowid, chunk_id, file_path, chunk_index, breadcrumb, content FROM chunks_fts',
+            )
+            .all() as Array<{
+            rowid: number;
+            chunk_id: string;
+            file_path: string;
+            chunk_index: number;
+            breadcrumb: string | null;
+            content: string | null;
+          }>
+        ).map((row) => ({
+          recordId: row.chunk_id,
+          filePath: row.file_path,
+          chunkIndex: row.chunk_index,
+          sourceRowid: row.rowid,
+          values: [row.breadcrumb ?? '', row.content ?? ''],
+        }));
+
+  const deleteTokens = db.prepare('DELETE FROM fts_short_tokens WHERE kind = ?');
+  const deleteRecords = db.prepare('DELETE FROM fts_short_records WHERE kind = ?');
+  const insertRecord = db.prepare(
+    'INSERT OR REPLACE INTO fts_short_records(kind, record_id, file_path, chunk_index, source_rowid) VALUES (?, ?, ?, ?, ?)',
+  );
+  const insertToken = db.prepare(
+    'INSERT OR IGNORE INTO fts_short_tokens(kind, record_id, token) VALUES (?, ?, ?)',
+  );
+  const setVersion = db.prepare(`
+    INSERT INTO fts_short_tokens_meta(kind, version) VALUES (?, ?)
+    ON CONFLICT(kind) DO UPDATE SET version = excluded.version
+  `);
+
+  db.transaction((items: typeof sources) => {
+    deleteTokens.run(kind);
+    deleteRecords.run(kind);
+    for (const source of items) {
+      insertRecord.run(
+        kind,
+        source.recordId,
+        source.filePath,
+        source.chunkIndex,
+        source.sourceRowid,
+      );
+      for (const token of getShortTokens(source.values)) {
+        insertToken.run(kind, source.recordId, token);
+      }
+    }
+    setVersion.run(kind, SHORT_TOKEN_INDEX_VERSION);
+  })(sources);
+}
+
+/** 主 FTS 被重建后，短 token 索引也必须重新生成。 */
+function invalidateShortTokenIndex(db: Database.Database, kind: ShortTokenKind): void {
+  ensureShortTokenIndex(db);
+  db.prepare('DELETE FROM fts_short_tokens_meta WHERE kind = ?').run(kind);
+}
+
+/**
+ * 短 token 使用 SQLite 倒排索引；不支持的 tokenizer 或短 token 形式保留 substring fallback。
+ * ponytail: 倒排索引以写入和存储换取短查询延迟；若存储占比过高，再改为压缩 posting list。
+ */
+function searchShortTokenIndex<T>(
+  db: Database.Database,
+  kind: ShortTokenKind,
+  tokens: string[],
+  limit: number,
+): T[] {
+  syncShortTokenIndex(db, kind);
+  const tokenJson = JSON.stringify(tokens.map((token) => token.toLowerCase()));
+  const query =
+    kind === 'file'
+      ? `SELECT r.record_id AS path, COUNT(*) AS score
+         FROM fts_short_tokens AS s
+         JOIN fts_short_records AS r
+           ON r.kind = s.kind AND r.record_id = s.record_id
+         WHERE s.kind = 'file' AND s.token IN (SELECT value FROM json_each(?))
+         GROUP BY r.record_id
+         ORDER BY score DESC, r.record_id
+         LIMIT ?`
+      : `SELECT r.record_id AS chunkId, r.file_path AS filePath, r.chunk_index AS chunkIndex,
+                COUNT(*) AS score
+         FROM fts_short_tokens AS s
+         JOIN fts_short_records AS r
+           ON r.kind = s.kind AND r.record_id = s.record_id
+         WHERE s.kind = 'chunk' AND s.token IN (SELECT value FROM json_each(?))
+         GROUP BY r.record_id
+         ORDER BY score DESC, r.record_id
+         LIMIT ?`;
+  return db.prepare(query).all(tokenJson, limit) as T[];
+}
+
+/** 直接扫描原文的兼容 fallback。 */
+function searchSubstringsScan<T>(
+  db: Database.Database,
+  table: 'files_fts' | 'chunks_fts',
+  columns: string[],
+  select: string,
+  tokens: string[],
+  limit: number,
+): T[] {
+  const score = tokens
+    .map(() => `(${columns.map((column) => `instr(lower(${column}), ?) > 0`).join(' OR ')})`)
+    .join(' + ');
+  const params = tokens.flatMap((token) => columns.map(() => token.toLowerCase()));
+  return db
+    .prepare(`SELECT ${select}, (${score}) AS score FROM ${table}
+      WHERE (${score}) > 0 ORDER BY score DESC, rowid LIMIT ?`)
+    .all(...params, ...params, limit) as T[];
+}
+
+/** 用短 token 倒排索引和 trigram MATCH 先取候选，再精确计算原有 substring score。 */
+function searchIndexedSubstrings<T>(
+  db: Database.Database,
+  kind: ShortTokenKind,
+  table: 'files_fts' | 'chunks_fts',
+  columns: string[],
+  select: string,
+  tokens: string[],
+  limit: number,
+): T[] {
+  const shortTokens = tokens.filter((token) => Array.from(token).length < 3);
+  if (
+    shortTokens.length === 0 ||
+    shortTokens.length === tokens.length ||
+    !shortTokens.every(canUseShortTokenIndex) ||
+    detectFtsTokenizer(db) !== 'trigram'
+  ) {
+    return searchSubstringsScan(db, table, columns, select, tokens, limit);
+  }
+
+  syncShortTokenIndex(db, kind);
+  const longTokens = tokens.filter((token) => Array.from(token).length >= 3);
+  const longQuery = longTokens.map((token) => `"${token.replace(/"/g, '')}"`).join(' OR ');
+  const score = tokens
+    .map(() => `(${columns.map((column) => `instr(lower(${column}), ?) > 0`).join(' OR ')})`)
+    .join(' + ');
+  const scoreParams = tokens.flatMap((token) => columns.map(() => token.toLowerCase()));
+  const shortTokenJson = JSON.stringify(shortTokens.map((token) => token.toLowerCase()));
+  const query = `WITH candidates AS (
+      SELECT r.source_rowid
+      FROM fts_short_tokens AS s
+      JOIN fts_short_records AS r
+        ON r.kind = s.kind AND r.record_id = s.record_id
+      WHERE s.kind = ? AND s.token IN (SELECT value FROM json_each(?))
+      UNION
+      SELECT rowid FROM ${table} WHERE ${table} MATCH ?
+    )
+    SELECT ${select}, (${score}) AS score
+    FROM ${table}
+    WHERE rowid IN (SELECT source_rowid FROM candidates)
+      AND (${score}) > 0
+    ORDER BY score DESC, rowid
+    LIMIT ?`;
+  return db
+    .prepare(query)
+    .all(kind, shortTokenJson, longQuery, ...scoreParams, ...scoreParams, limit) as T[];
+}
+
+/** 混合长短 token 查询优先走索引；不支持的 tokenizer 保留原 fallback。 */
+function searchSubstrings<T>(
+  db: Database.Database,
+  table: 'files_fts' | 'chunks_fts',
+  columns: string[],
+  select: string,
+  tokens: string[],
+  limit: number,
+): T[] {
+  const shortTokens = tokens.filter((token) => Array.from(token).length < 3);
+  if (shortTokens.length > 0) {
+    const kind = table === 'files_fts' ? 'file' : 'chunk';
+    return searchIndexedSubstrings(db, kind, table, columns, select, tokens, limit);
+  }
+  return searchSubstringsScan(db, table, columns, select, tokens, limit);
 }
 
 // FTS 表初始化
@@ -78,6 +342,8 @@ export function initFilesFts(db: Database.Database): void {
     // 同步已有文件数据
     syncFilesFts(db);
   }
+
+  syncShortTokenIndex(db, 'file');
 }
 
 /**
@@ -100,6 +366,7 @@ function syncFilesFts(db: Database.Database): void {
             INSERT INTO files_fts(path, content) 
             SELECT path, content FROM files WHERE content IS NOT NULL;
         `);
+    invalidateShortTokenIndex(db, 'file');
 
     logger.info(`FTS 索引同步完成: ${fileCount} 条记录`);
   }
@@ -143,6 +410,8 @@ export function initChunksFts(db: Database.Database): void {
         `);
     logger.info(`创建 chunks_fts 表，tokenizer=${tokenizer}`);
   }
+
+  syncShortTokenIndex(db, 'chunk');
 }
 
 /**
@@ -170,16 +439,63 @@ export function batchUpsertChunkFts(
     breadcrumb: string;
     content: string;
   }>,
+  replacePaths?: string[],
 ): void {
-  const deleteStmt = db.prepare('DELETE FROM chunks_fts WHERE chunk_id = ?');
+  syncShortTokenIndex(db, 'chunk');
+  // 文件替换路径不需要逐 chunk 查重；普通 upsert 也只扫描一次。
+  const ids = JSON.stringify(replacePaths ?? chunks.map((item) => item.chunkId));
+  const deleteShortTokens = db.prepare(
+    replacePaths
+      ? `DELETE FROM fts_short_tokens
+         WHERE kind = 'chunk' AND record_id IN (
+           SELECT record_id FROM fts_short_records
+           WHERE kind = 'chunk' AND file_path IN (SELECT value FROM json_each(?))
+         )`
+      : `DELETE FROM fts_short_tokens
+         WHERE kind = 'chunk' AND record_id IN (SELECT value FROM json_each(?))`,
+  );
+  const deleteShortRecords = db.prepare(
+    replacePaths
+      ? `DELETE FROM fts_short_records
+         WHERE kind = 'chunk' AND file_path IN (SELECT value FROM json_each(?))`
+      : `DELETE FROM fts_short_records
+         WHERE kind = 'chunk' AND record_id IN (SELECT value FROM json_each(?))`,
+  );
+  const deleteStmt = db.prepare(
+    `DELETE FROM chunks_fts WHERE ${replacePaths ? 'file_path' : 'chunk_id'} IN (SELECT value FROM json_each(?))`,
+  );
   const insertStmt = db.prepare(
     'INSERT INTO chunks_fts(chunk_id, file_path, chunk_index, breadcrumb, content) VALUES (?, ?, ?, ?, ?)',
   );
+  const insertShortRecord = db.prepare(
+    'INSERT OR REPLACE INTO fts_short_records(kind, record_id, file_path, chunk_index, source_rowid) VALUES (?, ?, ?, ?, ?)',
+  );
+  const insertShortToken = db.prepare(
+    'INSERT OR IGNORE INTO fts_short_tokens(kind, record_id, token) VALUES (?, ?, ?)',
+  );
 
   const transaction = db.transaction((items: typeof chunks) => {
+    deleteShortTokens.run(ids);
+    deleteShortRecords.run(ids);
+    deleteStmt.run(ids);
     for (const item of items) {
-      deleteStmt.run(item.chunkId);
-      insertStmt.run(item.chunkId, item.filePath, item.chunkIndex, item.breadcrumb, item.content);
+      const inserted = insertStmt.run(
+        item.chunkId,
+        item.filePath,
+        item.chunkIndex,
+        item.breadcrumb,
+        item.content,
+      );
+      insertShortRecord.run(
+        'chunk',
+        item.chunkId,
+        item.filePath,
+        item.chunkIndex,
+        Number(inserted.lastInsertRowid),
+      );
+      for (const token of getShortTokens([item.breadcrumb, item.content])) {
+        insertShortToken.run('chunk', item.chunkId, token);
+      }
     }
   });
 
@@ -190,13 +506,25 @@ export function batchUpsertChunkFts(
  * 批量删除文件的 chunk FTS 索引
  */
 export function batchDeleteFileChunksFts(db: Database.Database, filePaths: string[]): void {
-  const stmt = db.prepare('DELETE FROM chunks_fts WHERE file_path = ?');
-  const transaction = db.transaction((paths: string[]) => {
-    for (const p of paths) {
-      stmt.run(p);
-    }
-  });
-  transaction(filePaths);
+  if (filePaths.length === 0) return;
+  syncShortTokenIndex(db, 'chunk');
+  const paths = JSON.stringify(filePaths);
+  db.transaction(() => {
+    db.prepare(
+      `DELETE FROM fts_short_tokens
+       WHERE kind = 'chunk' AND record_id IN (
+         SELECT record_id FROM fts_short_records
+         WHERE kind = 'chunk' AND file_path IN (SELECT value FROM json_each(?))
+       )`,
+    ).run(paths);
+    db.prepare(
+      `DELETE FROM fts_short_records
+       WHERE kind = 'chunk' AND file_path IN (SELECT value FROM json_each(?))`,
+    ).run(paths);
+    db.prepare('DELETE FROM chunks_fts WHERE file_path IN (SELECT value FROM json_each(?))').run(
+      paths,
+    );
+  })();
 }
 
 /**
@@ -227,6 +555,21 @@ export function searchChunksFts(
     },
     'Chunk FTS 分词结果',
   );
+
+  const shortTokens = tokens.filter((token) => Array.from(token).length < 3);
+  if (shortTokens.length === tokens.length && tokens.every(canUseShortTokenIndex)) {
+    return searchShortTokenIndex<ChunkFtsResult>(db, 'chunk', shortTokens, limit);
+  }
+  if (shortTokens.length > 0) {
+    return searchSubstrings<ChunkFtsResult>(
+      db,
+      'chunks_fts',
+      ['breadcrumb', 'content'],
+      'chunk_id AS chunkId, file_path AS filePath, chunk_index AS chunkIndex',
+      tokens,
+      limit,
+    );
+  }
 
   // 辅助：执行 SQL 查询
   const runQuery = (qStr: string, queryLimit: number): ChunkFtsResult[] => {
@@ -311,13 +654,38 @@ export function batchUpsertFileFts(
   db: Database.Database,
   files: Array<{ path: string; content: string }>,
 ): void {
-  const deleteFts = db.prepare('DELETE FROM files_fts WHERE path = ?');
+  if (files.length === 0) return;
+  syncShortTokenIndex(db, 'file');
+  const paths = JSON.stringify(files.map((item) => item.path));
+  const deleteFts = db.prepare(
+    'DELETE FROM files_fts WHERE path IN (SELECT value FROM json_each(?))',
+  );
+  const deleteShortTokens = db.prepare(
+    `DELETE FROM fts_short_tokens
+     WHERE kind = 'file' AND record_id IN (SELECT value FROM json_each(?))`,
+  );
+  const deleteShortRecords = db.prepare(
+    `DELETE FROM fts_short_records
+     WHERE kind = 'file' AND record_id IN (SELECT value FROM json_each(?))`,
+  );
   const insertFts = db.prepare('INSERT INTO files_fts(path, content) VALUES (?, ?)');
+  const insertShortRecord = db.prepare(
+    'INSERT OR REPLACE INTO fts_short_records(kind, record_id, file_path, chunk_index, source_rowid) VALUES (?, ?, ?, ?, ?)',
+  );
+  const insertShortToken = db.prepare(
+    'INSERT OR IGNORE INTO fts_short_tokens(kind, record_id, token) VALUES (?, ?, ?)',
+  );
 
   const transaction = db.transaction((items: Array<{ path: string; content: string }>) => {
+    deleteShortTokens.run(paths);
+    deleteShortRecords.run(paths);
+    deleteFts.run(paths);
     for (const item of items) {
-      deleteFts.run(item.path);
-      insertFts.run(item.path, item.content);
+      const inserted = insertFts.run(item.path, item.content);
+      insertShortRecord.run('file', item.path, item.path, null, Number(inserted.lastInsertRowid));
+      for (const token of getShortTokens([item.path, item.content])) {
+        insertShortToken.run('file', item.path, token);
+      }
     }
   });
 
@@ -328,13 +696,22 @@ export function batchUpsertFileFts(
  * 批量删除 FTS 索引记录
  */
 export function batchDeleteFileFts(db: Database.Database, paths: string[]): void {
-  const stmt = db.prepare('DELETE FROM files_fts WHERE path = ?');
-  const transaction = db.transaction((items: string[]) => {
-    for (const path of items) {
-      stmt.run(path);
-    }
-  });
-  transaction(paths);
+  if (paths.length === 0) return;
+  syncShortTokenIndex(db, 'file');
+  const pathJson = JSON.stringify(paths);
+  db.transaction(() => {
+    db.prepare(
+      `DELETE FROM fts_short_tokens
+       WHERE kind = 'file' AND record_id IN (SELECT value FROM json_each(?))`,
+    ).run(pathJson);
+    db.prepare(
+      `DELETE FROM fts_short_records
+       WHERE kind = 'file' AND record_id IN (SELECT value FROM json_each(?))`,
+    ).run(pathJson);
+    db.prepare('DELETE FROM files_fts WHERE path IN (SELECT value FROM json_each(?))').run(
+      pathJson,
+    );
+  })();
 }
 
 // FTS 搜索接口
@@ -362,6 +739,19 @@ function sanitizeQuery(query: string): string {
 }
 
 // 核心工具：统一分词器
+
+const tokenBoundaryRegexCache = new Map<string, RegExp>();
+
+/** 搜索与 import 扩展共享预编译的 token 边界正则。 */
+export function getTokenBoundaryRegex(token: string): RegExp {
+  let regex = tokenBoundaryRegexCache.get(token);
+  if (!regex) {
+    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    regex = new RegExp(`\\b${escaped}\\b`);
+    tokenBoundaryRegexCache.set(token, regex);
+  }
+  return regex;
+}
 
 // 性能优化：Intl.Segmenter 单例（避免每次搜索都创建新实例）
 let zhSegmenter: Intl.Segmenter | null = null;
@@ -520,6 +910,21 @@ export function searchFilesFts(
     },
     'FTS 分词结果',
   );
+
+  const shortTokens = tokens.filter((token) => Array.from(token).length < 3);
+  if (shortTokens.length === tokens.length && tokens.every(canUseShortTokenIndex)) {
+    return searchShortTokenIndex<FtsSearchResult>(db, 'file', shortTokens, limit);
+  }
+  if (shortTokens.length > 0) {
+    return searchSubstrings<FtsSearchResult>(
+      db,
+      'files_fts',
+      ['path', 'content'],
+      'path',
+      tokens,
+      limit,
+    );
+  }
 
   // 辅助：执行 SQL 查询
   const runQuery = (qStr: string, queryLimit: number): FtsSearchResult[] => {

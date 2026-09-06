@@ -5,7 +5,7 @@
  * 最终输出适合 LLM 消费的上下文包。
  */
 
-import { initDb } from '../db/index.js';
+import { getSharedDb } from '../db/index.js';
 import type { ScoredChunk, SearchConfig, Segment } from './types.js';
 
 export class ContextPacker {
@@ -27,7 +27,7 @@ export class ContextPacker {
     const byFile = this.groupByFile(chunks);
 
     // 2. 每个文件内合并区间 + 从原文件切片
-    const db = initDb(this.projectId);
+    const db = getSharedDb(this.projectId);
     const result: Array<{ filePath: string; segments: Segment[] }> = [];
     let totalChars = 0;
 
@@ -137,10 +137,18 @@ export class ContextPacker {
       }
     }
 
-    // 从原文件切片，并计算行号
+    // 区间已按偏移排序，行号游标只需遍历文件一次。
+    let offset = 0;
+    let line = 1;
+    const offsetToLine = (end: number): number => {
+      while (offset < end && offset < content.length) {
+        if (content[offset++] === '\n') line++;
+      }
+      return line;
+    };
     return intervals.map((iv) => {
-      const startLine = this.offsetToLine(content, iv.start);
-      const endLine = this.offsetToLine(content, iv.end);
+      const startLine = offsetToLine(iv.start);
+      const endLine = offsetToLine(iv.end);
       return {
         filePath: chunks[0].filePath,
         rawStart: iv.start,
@@ -152,18 +160,5 @@ export class ContextPacker {
         text: content.slice(iv.start, iv.end),
       };
     });
-  }
-
-  /**
-   * 将字符偏移量转换为行号（1-indexed）
-   */
-  private offsetToLine(content: string, offset: number): number {
-    let line = 1;
-    for (let i = 0; i < offset && i < content.length; i++) {
-      if (content[i] === '\n') {
-        line++;
-      }
-    }
-    return line;
   }
 }

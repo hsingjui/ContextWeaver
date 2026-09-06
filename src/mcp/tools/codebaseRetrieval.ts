@@ -87,7 +87,8 @@ RERANK_BASE_URL=https://api.siliconflow.cn/v1/rerank
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
 RERANK_TOP_N=20
 
-# 索引忽略模式（可选，逗号分隔，默认已包含常见忽略项）
+# 索引忽略模式（可选，逗号分隔，gitignore 语法，默认已包含常见忽略项）
+# 优先级最高，可用 ! 取反默认项，例：IGNORE_PATTERNS=!dist,.next,*.generated.ts
 # IGNORE_PATTERNS=.venv,node_modules
 `;
 
@@ -142,6 +143,8 @@ async function ensureIndexed(
 
       const startTime = Date.now();
       const stats = await scan(repoPath, { vectorIndex: true, onProgress });
+      const errors = stats.errors + (stats.vectorIndex?.errors ?? 0);
+      if (errors > 0) throw new Error(`索引有 ${errors} 个文件失败，请重试以补全索引`);
       const elapsed = Date.now() - startTime;
 
       logger.info(

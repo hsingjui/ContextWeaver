@@ -19,9 +19,9 @@ afterEach(() => {
   }
 });
 
-function installFetchMock(
-  handler: (inputs: string[]) => { status: number; body: unknown },
-): { calls: FetchCall[] } {
+function installFetchMock(handler: (inputs: string[]) => { status: number; body: unknown }): {
+  calls: FetchCall[];
+} {
   const calls: FetchCall[] = [];
 
   globalThis.fetch = (async (_url: string, init?: RequestInit) => {
@@ -78,10 +78,12 @@ test('embedBatch splits long text and averages embeddings', async () => {
 
   const allSegments = calls.flatMap((call) => call.inputs);
   assert.ok(allSegments.length > 1, 'expected input to be split into segments');
-  assert.ok(allSegments.every((text) => text.length <= 10), 'segment exceeds maxInputChars');
+  assert.ok(
+    allSegments.every((text) => text.length <= 10),
+    'segment exceeds maxInputChars',
+  );
 
-  const expected =
-    allSegments.reduce((sum, text) => sum + text.length, 0) / allSegments.length;
+  const expected = allSegments.reduce((sum, text) => sum + text.length, 0) / allSegments.length;
 
   assert.equal(results.length, 1);
   assert.equal(results[0].embedding.length, 1);
@@ -153,8 +155,7 @@ test('embedBatch retries by binary split on input too long errors', async () => 
   );
 
   const retrySegments = allSegments.filter((text) => text.length <= threshold);
-  const expected =
-    retrySegments.reduce((sum, text) => sum + text.length, 0) / retrySegments.length;
+  const expected = retrySegments.reduce((sum, text) => sum + text.length, 0) / retrySegments.length;
 
   assert.equal(results.length, 1);
   assert.equal(results[0].embedding.length, 1);
@@ -200,8 +201,7 @@ test('embedBatch retries when API returns 200 with error message', async () => {
   );
 
   const retrySegments = allSegments.filter((text) => text.length <= threshold);
-  const expected =
-    retrySegments.reduce((sum, text) => sum + text.length, 0) / retrySegments.length;
+  const expected = retrySegments.reduce((sum, text) => sum + text.length, 0) / retrySegments.length;
 
   assert.equal(results.length, 1);
   assert.equal(results[0].embedding.length, 1);
@@ -237,8 +237,7 @@ test('embedBatch retries when API returns nested error message', async () => {
 
   const allSegments = calls.flatMap((call) => call.inputs);
   const retrySegments = allSegments.filter((text) => text.length <= threshold);
-  const expected =
-    retrySegments.reduce((sum, text) => sum + text.length, 0) / retrySegments.length;
+  const expected = retrySegments.reduce((sum, text) => sum + text.length, 0) / retrySegments.length;
 
   assert.ok(retrySegments.length > 0, 'expected retry calls with shorter segments');
   assert.equal(results.length, 1);

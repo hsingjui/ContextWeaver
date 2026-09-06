@@ -24,7 +24,7 @@
 - **RRF 融合 (Reciprocal Rank Fusion)**：智能融合多路召回结果
 
 ### 🧠 AST 语义分片
-- **Tree-sitter 解析**：支持 TypeScript、JavaScript、Python、Go、Java、Rust 六大语言
+- **Tree-sitter 解析**：支持 TypeScript/TSX、JavaScript、Python、Go、Java、Rust、C/C++ 和 C#；其他白名单语言或解析失败时按文本分片
 - **Dual-Text 策略**：`displayCode` 用于展示，`vectorText` 用于 Embedding
 - **Gap-Aware 合并**：智能处理代码间隙，保持语义完整性
 - **Breadcrumb 注入**：向量文本包含层级路径，提升检索召回率
@@ -80,15 +80,28 @@ EMBEDDINGS_MODEL=BAAI/bge-m3
 EMBEDDINGS_MAX_CONCURRENCY=10
 EMBEDDINGS_DIMENSIONS=1024
 
+# 单文件大小上限（可选，单位字节，默认 100 KB）
+# MAX_FILE_SIZE_BYTES=102400
+
 # Reranker 配置（必需）
 RERANK_API_KEY=your-api-key-here
 RERANK_BASE_URL=https://api.siliconflow.cn/v1/rerank
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
 RERANK_TOP_N=20
 
-# 忽略模式（可选，逗号分隔）
+# 忽略模式（可选，逗号分隔，gitignore 语法，可用 ! 取反默认项）
 # IGNORE_PATTERNS=.venv,node_modules
 ```
+
+### 自定义忽略
+
+忽略规则按优先级从低到高依次生效，后面的可覆盖前面的（gitignore 语义）：
+
+1. **内置默认模式**：构建产物、锁文件、`node_modules`、点开头目录等（见 `src/config.ts`）
+2. **`.gitignore`**：自动读取根目录及实际遍历到的子目录规则，保留目录相对匹配和 `!` 否定语义
+3. **`IGNORE_PATTERNS`** 环境变量：临时覆盖，优先级最高，可用 `!` 取反前面的规则（如 `!dist`）
+
+> 与 git 一致：取反只对**未被剪枝的目录内部**生效。若目录本身已被忽略，需先取反该目录（`!dist` 而非 `!dist/app.ts`）。
 
 ### 索引代码库
 
@@ -102,6 +115,10 @@ contextweaver index /path/to/your/project
 # 强制重新索引
 contextweaver index --force
 ```
+
+索引按有限文件批次提交，失败文件和未完成的删除会在下次运行时重试。CLI 部分失败时返回非零退出码，MCP 不会把不完整索引当作已完成。
+
+Embedding 模型、服务地址、维度或分块版本变化时会自动重建派生索引。升级前没有索引配置指纹的旧索引也会重建一次，产生新的 Embedding 请求。默认 100 KB 文件限制可通过 `MAX_FILE_SIZE_BYTES` 调整；增大上限会提高单批内存需求。
 
 ### 本地搜索
 
@@ -269,7 +286,7 @@ contextweaver/
 | `RERANK_BASE_URL` | ✅ | - | Reranker API 地址 |
 | `RERANK_MODEL` | ✅ | - | Reranker 模型名称 |
 | `RERANK_TOP_N` | ❌ | 20 | Rerank 返回数量 |
-| `IGNORE_PATTERNS` | ❌ | - | 额外忽略模式 |
+| `IGNORE_PATTERNS` | ❌ | - | 额外忽略模式（逗号分隔，优先级最高） |
 
 ### 搜索配置参数
 

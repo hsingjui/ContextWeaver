@@ -2,7 +2,7 @@
  * VectorStore - LanceDB 适配层
  *
  * 负责 chunks 表的管理，支持：
- * - 单调版本更新（先插后删）避免缺失窗口
+ * - 幂等版本更新（重试标记同版本，写入成功后删除旧版本）
  * - 批量插入和查询
  * - 文件级删除
  */
@@ -114,11 +114,7 @@ export class VectorStore {
   }
 
   /**
-   * 单调版本更新：先插入新版本，再删除旧版本
-   *
-   * 这保证了：
-   * - 最坏情况（崩溃）是新旧版本共存（不缺失）
-   * - 正常情况下旧版本被清理
+   * 幂等版本更新：先标记同版本重试残留，再插入新版本并删除旧版本
    */
   async upsertFile(filePath: string, newHash: string, records: ChunkRecord[]): Promise<void> {
     if (!this.db) throw new Error('VectorStore not initialized');
@@ -127,6 +123,15 @@ export class VectorStore {
       // 如果没有新 chunks，也要删除旧版本（文件可能变成空/无法解析）
       await this.deleteFile(filePath);
       return;
+    }
+
+    // 将同 hash 的残留标记为旧版本，但保留可检索内容直到新记录写入成功。
+    // retry: 不会与正常的 SHA-256 hash 冲突；重试成功后由旧版本清理一并删除。
+    if (this.table) {
+      await this.table.update({
+        where: `file_path = '${this.escapeString(filePath)}' AND file_hash = '${this.escapeString(newHash)}'`,
+        valuesSql: { file_hash: "concat('retry:', file_hash)" },
+      });
     }
 
     // 1. 插入新版本
@@ -149,7 +154,7 @@ export class VectorStore {
    *
    * 流程：
    * 1. 将文件分成小批次（每批最多 BATCH_FILES 个文件或 BATCH_RECORDS 条记录）
-   * 2. 每批执行：插入新 records → 删除旧版本
+   * 2. 每批执行：标记同版本重试残留 → 插入新 records → 删除旧版本
    *
    * 分批是必要的，因为 LanceDB native 模块在处理超大数据时可能崩溃
    *
@@ -204,12 +209,29 @@ export class VectorStore {
         continue;
       }
 
+      // 同 hash 的重试残留标记为旧版本，写入失败时仍可检索。
+      if (this.table) {
+        const retryConditions = batch
+          .map(
+            (f) =>
+              `(file_path = '${this.escapeString(f.path)}' AND file_hash = '${this.escapeString(f.hash)}')`,
+          )
+          .join(' OR ');
+        await this.table.update({
+          where: retryConditions,
+          valuesSql: { file_hash: "concat('retry:', file_hash)" },
+        });
+      }
+
       // 1. 批量插入本批次的 records
       if (!this.table) {
         await this.ensureTable(batchRecords);
       } else {
         await this.table.add(batchRecords as unknown as Record<string, unknown>[]);
       }
+
+      // 空文件也必须清理所有历史版本。
+      await this.deleteFiles(batch.filter((f) => f.records.length === 0).map((f) => f.path));
 
       // 2. 批量删除本批次的旧版本
       if (this.table && batch.length > 0) {
@@ -320,14 +342,9 @@ export class VectorStore {
    * 清空所有数据
    */
   async clear(): Promise<void> {
-    if (!this.db) return;
-
-    try {
-      await this.db.dropTable('chunks');
-      this.table = null;
-    } catch {
-      // 表不存在，忽略
-    }
+    if (!this.db || !this.table) return;
+    await this.db.dropTable('chunks');
+    this.table = null;
   }
 
   /**
@@ -375,6 +392,12 @@ export async function getVectorStore(projectId: string, vectorDim = 1024): Promi
 /**
  * 关闭所有 VectorStore 连接
  */
+export async function closeVectorStore(projectId: string): Promise<void> {
+  const store = vectorStores.get(projectId);
+  if (store) await store.close();
+  vectorStores.delete(projectId);
+}
+
 export async function closeAllVectorStores(): Promise<void> {
   for (const store of vectorStores.values()) {
     await store.close();

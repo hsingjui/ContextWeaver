@@ -133,7 +133,7 @@ export class SourceAdapter {
   /**
    * 将字节偏移转换为字符偏移
    */
-  private byteToChar(byteOffset: number): number {
+  public byteToChar(byteOffset: number): number {
     if (!this.byteToCharMap) return byteOffset;
 
     const safeOffset = Math.max(0, Math.min(this.byteToCharMap.length - 1, byteOffset));

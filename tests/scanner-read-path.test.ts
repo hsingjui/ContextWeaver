@@ -117,8 +117,7 @@ test('processFile：二进制/BOM/GBK/lock/大文件', async (t) => {
 });
 
 test('扫描窗口内被删除的文件 → skipped 而非 error', async () => {
-  const ghost = path.join(ROOT, 'ghost.ts');
-  const [result] = await processFiles(ROOT, [ghost], new Map());
+  const [result] = await processFiles(ROOT, ['ghost.ts'], new Map());
   assert.equal(result.status, 'skipped');
   assert.match(result.error ?? '', /File deleted during scan/);
 });

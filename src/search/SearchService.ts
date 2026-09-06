@@ -11,7 +11,7 @@
 import type Database from 'better-sqlite3';
 import { getRerankerClient } from '../api/reranker.js';
 import { getEmbeddingConfig } from '../config.js';
-import { initDb } from '../db/index.js';
+import { getSharedDb } from '../db/index.js';
 import { getIndexer, type Indexer } from '../indexer/index.js';
 import { isDebugEnabled, logger } from '../utils/logger.js';
 import type { SearchResult as VectorSearchResult } from '../vectorStore/index.js';
@@ -19,6 +19,7 @@ import { getVectorStore, type VectorStore } from '../vectorStore/index.js';
 import { ContextPacker } from './ContextPacker.js';
 import { DEFAULT_CONFIG } from './config.js';
 import {
+  getTokenBoundaryRegex,
   isChunksFtsInitialized,
   isFtsInitialized,
   searchChunksFts,
@@ -27,28 +28,6 @@ import {
 } from './fts.js';
 import { getGraphExpander } from './GraphExpander.js';
 import type { ContextPack, ScoredChunk, SearchConfig } from './types.js';
-
-// ===========================================
-// 性能优化：Token 边界 RegExp 缓存
-// ===========================================
-
-/** 缓存预编译的 token 边界正则表达式 */
-const tokenBoundaryRegexCache = new Map<string, RegExp>();
-
-/**
- * 获取或创建 token 边界正则表达式（带缓存）
- *
- * 避免每次 scoreChunkTokenOverlap 调用都创建 N 个 RegExp 对象
- */
-function getTokenBoundaryRegex(token: string): RegExp {
-  let regex = tokenBoundaryRegexCache.get(token);
-  if (!regex) {
-    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    regex = new RegExp(`\\b${escaped}\\b`);
-    tokenBoundaryRegexCache.set(token, regex);
-  }
-  return regex;
-}
 
 export class SearchService {
   private projectId: string;
@@ -66,7 +45,7 @@ export class SearchService {
     const embeddingConfig = getEmbeddingConfig();
     this.indexer = await getIndexer(this.projectId, embeddingConfig.dimensions);
     this.vectorStore = await getVectorStore(this.projectId, embeddingConfig.dimensions);
-    this.db = initDb(this.projectId);
+    this.db = getSharedDb(this.projectId);
   }
 
   // 公开接口
@@ -289,11 +268,12 @@ export class SearchService {
     const allChunks: ScoredChunk[] = [];
     let totalChunks = 0;
     let skippedFiles = 0;
+    const chunksByFile = await this.vectorStore?.getFilesChunks(fileResults.map((r) => r.path));
 
     for (const { path: filePath, score: fileScore } of fileResults) {
       if (totalChunks >= this.config.lexTotalChunks) break;
 
-      const chunks = await this.vectorStore?.getFileChunks(filePath);
+      const chunks = chunksByFile?.get(filePath);
       if (!chunks || chunks.length === 0) continue;
 
       // 对每个 chunk 计算 token overlap 得分
@@ -778,7 +758,7 @@ export class SearchService {
     const prefix = start > 0 ? '...' : '';
     const suffix = end < lines.length - 1 ? '...' : '';
 
-    return prefix + result + suffix;
+    return this.truncateHeadTail(prefix + result + suffix, maxLen, this.config.headRatio);
   }
 
   /**

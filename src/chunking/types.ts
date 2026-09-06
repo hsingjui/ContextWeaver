@@ -74,7 +74,7 @@ export interface SplitterConfig {
    * 分片重叠大小（非空白字符数）
    * - 用于提升语义检索的召回率
    * - 只影响 vectorText/vectorSpan，不影响 rawSpan
-   * - 默认为 0（不重叠）
+   * - 默认为 200（构造函数中设置）
    */
   chunkOverlap: number;
   /**

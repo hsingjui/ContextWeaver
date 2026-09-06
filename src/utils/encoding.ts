@@ -59,6 +59,28 @@ function detectBOM(buffer: Buffer): string | null {
 }
 
 /**
+ * 检测编码：BOM 优先 → 可打印 ASCII 短路 → chardet 启发式
+ */
+export function detectEncoding(buffer: Buffer): string {
+  let encoding = detectBOM(buffer);
+
+  // 仅对可打印 ASCII 和常见空白短路；保留 NUL/ESC 等编码信号的探测
+  if (
+    !encoding &&
+    buffer.every(
+      (byte) => (byte >= 0x20 && byte <= 0x7e) || byte === 0x09 || byte === 0x0a || byte === 0x0d,
+    )
+  ) {
+    encoding = 'UTF-8';
+  }
+
+  if (!encoding) {
+    encoding = chardet.detect(buffer) || 'UTF-8';
+  }
+  return encoding;
+}
+
+/**
  * 解码缓冲区为 UTF-8 字符串（自动检测编码）
  *
  * 调用方须先用 buffer.includes(0) 做二进制检测——必须在解码前基于原始字节进行，
@@ -68,9 +90,7 @@ function detectBOM(buffer: Buffer): string | null {
  * @returns 解码后的 UTF-8 内容
  */
 export function decodeBuffer(buffer: Buffer): string {
-  // 检测编码：BOM 优先，其次 chardet 启发式检测
-  const encoding = detectBOM(buffer) || chardet.detect(buffer) || 'UTF-8';
-  const normalizedEncoding = normalizeEncoding(encoding);
+  const normalizedEncoding = normalizeEncoding(detectEncoding(buffer));
 
   // 解码（iconv 对无效字节采用替换策略，不会抛异常）
   let content: string;

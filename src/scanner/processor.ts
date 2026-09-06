@@ -13,15 +13,15 @@ import { sha256 } from './hash.js';
 import { getLanguage } from './language.js';
 
 /**
- * 大文件阈值（字节）
+ * 大文件阈值（字节），可通过 MAX_FILE_SIZE_BYTES 环境变量调整
  */
-const MAX_FILE_SIZE = 100 * 1024; // 100KB
-
-/**
- * 需要兜底分片支持的目标语言集合
- * 这些语言的文件即使 AST 解析失败也会使用行分片保证可检索
- */
-const FALLBACK_LANGS = new Set(['python', 'go', 'rust', 'java', 'markdown', 'json']);
+export function getMaxFileSize(): number {
+  const value = Number(process.env.MAX_FILE_SIZE_BYTES ?? 100 * 1024);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error('MAX_FILE_SIZE_BYTES must be a positive integer');
+  }
+  return value;
+}
 
 /**
  * 检查 JSON 文件是否应该跳过索引
@@ -60,13 +60,14 @@ function getAdaptiveConcurrency(): number {
 }
 
 /**
- * 分片器单例
+ * 分片器配置（导出供索引指纹使用）
  */
-const splitter = new SemanticSplitter({
+export const SPLITTER_CONFIG = {
   maxChunkSize: 500,
   minChunkSize: 50,
   chunkOverlap: 40, // 混合检索(BM25+向量+rerank)下的保守 overlap
-});
+};
+const splitter = new SemanticSplitter(SPLITTER_CONFIG);
 
 /**
  * 文件处理结果
@@ -99,7 +100,8 @@ export interface KnownFileMeta {
 async function processFile(
   absPath: string,
   relPath: string,
-  known?: KnownFileMeta,
+  known: KnownFileMeta | undefined,
+  maxFileSize: number,
 ): Promise<ProcessResult> {
   const language = getLanguage(relPath);
 
@@ -125,7 +127,7 @@ async function processFile(
     const size = stat.size;
 
     // 检查大文件
-    if (size > MAX_FILE_SIZE) {
+    if (size > maxFileSize) {
       return {
         absPath,
         relPath,
@@ -136,7 +138,7 @@ async function processFile(
         mtime,
         size,
         status: 'skipped',
-        error: `File too large (${size} bytes > ${MAX_FILE_SIZE} bytes)`,
+        error: `File too large (${size} bytes > ${maxFileSize} bytes)`,
       };
     }
 
@@ -214,13 +216,15 @@ async function processFile(
     // 语义分片
     let chunks: ProcessedChunk[] = [];
 
-    // 1. 尝试 AST 分片（如果语言支持）
+    // 1. 尝试 AST 分片（如果语言支持）；.tsx 文件路由到 tsx 语法
     if (isLanguageSupported(language)) {
       try {
-        const parser = await getParser(language);
+        const parser = await getParser(
+          language === 'typescript' && relPath.toLowerCase().endsWith('.tsx') ? 'tsx' : language,
+        );
         if (parser) {
           const tree = parser.parse(content);
-          chunks = splitter.split(tree, content, relPath, language);
+          if (!tree.rootNode.hasError) chunks = splitter.split(tree, content, relPath, language);
         }
       } catch (err) {
         const error = err as { message?: string };
@@ -229,8 +233,8 @@ async function processFile(
       }
     }
 
-    // 兜底分片：对 FALLBACK_LANGS 语言，如果 AST 分片失败或返回空，使用行分片
-    if (chunks.length === 0 && FALLBACK_LANGS.has(language)) {
+    // 兜底分片：所有白名单语言在无 grammar 或 AST 分片失败/出错时使用行分片
+    if (chunks.length === 0 && language !== 'unknown') {
       chunks = splitter.splitPlainText(content, relPath, language);
     }
 
@@ -279,21 +283,20 @@ async function processFile(
 }
 
 /**
- * 批量处理文件
+ * 批量处理文件。relPaths 为相对根目录、以 / 分隔的路径。
  */
 export async function processFiles(
   rootPath: string,
-  filePaths: string[],
+  relPaths: string[],
   knownFiles: Map<string, KnownFileMeta>,
 ): Promise<ProcessResult[]> {
+  const maxFileSize = getMaxFileSize();
   const concurrency = getAdaptiveConcurrency();
   const limit = pLimit(concurrency);
 
-  const tasks = filePaths.map((filePath) => {
-    // 标准化路径分隔符为 /，确保跨平台一致性
-    const relPath = path.relative(rootPath, filePath).replace(/\\/g, '/');
+  const tasks = relPaths.map((relPath) => {
     const known = knownFiles.get(relPath);
-    return limit(() => processFile(filePath, relPath, known));
+    return limit(() => processFile(path.join(rootPath, relPath), relPath, known, maxFileSize));
   });
 
   return Promise.all(tasks);

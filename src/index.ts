@@ -73,7 +73,8 @@ RERANK_BASE_URL=https://api.siliconflow.cn/v1/rerank
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
 RERANK_TOP_N=20
 
-# 索引忽略模式（可选，逗号分隔，默认已包含常见忽略项）
+# 索引忽略模式（可选，逗号分隔，gitignore 语法，默认已包含常见忽略项）
+# 优先级最高，可用 ! 取反默认项，例：IGNORE_PATTERNS=!dist,.next,*.generated.ts
 # IGNORE_PATTERNS=.venv,node_modules
 `;
   try {
@@ -133,10 +134,12 @@ cli
       process.stdout.write('\n');
 
       const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-      logger.info(`索引完成 (${duration}s)`);
+      const errors = stats.errors + (stats.vectorIndex?.errors ?? 0);
+      logger.info(`${errors ? '索引部分失败，可重试' : '索引完成'} (${duration}s)`);
       logger.info(
-        `总数:${stats.totalFiles} 新增:${stats.added} 修改:${stats.modified} 未变:${stats.unchanged} 删除:${stats.deleted} 跳过:${stats.skipped} 错误:${stats.errors}`,
+        `总数:${stats.totalFiles} 新增:${stats.added} 修改:${stats.modified} 未变:${stats.unchanged} 删除:${stats.deleted} 跳过:${stats.skipped} 错误:${errors}`,
       );
+      if (errors > 0) process.exitCode = 1;
     } catch (err) {
       const error = err as { message?: string; stack?: string };
       logger.error({ err, stack: error.stack }, `索引失败: ${error.message}`);

@@ -9,9 +9,10 @@
 
 import type Database from 'better-sqlite3';
 import { getEmbeddingConfig } from '../config.js';
-import { initDb } from '../db/index.js';
+import { getSharedDb } from '../db/index.js';
 import { logger } from '../utils/logger.js';
 import { type ChunkRecord, getVectorStore, type VectorStore } from '../vectorStore/index.js';
+import { getTokenBoundaryRegex } from './fts.js';
 import { createResolvers, type ImportResolver } from './resolvers/index.js';
 import type { ScoredChunk, SearchConfig } from './types.js';
 
@@ -54,7 +55,7 @@ export class GraphExpander {
   async init(): Promise<void> {
     const embeddingConfig = getEmbeddingConfig();
     this.vectorStore = await getVectorStore(this.projectId, embeddingConfig.dimensions);
-    this.db = initDb(this.projectId);
+    this.db = getSharedDb(this.projectId);
   }
 
   /**
@@ -64,7 +65,7 @@ export class GraphExpander {
   private loadFileIndex(): void {
     if (this.allFilePaths) return;
 
-    if (!this.db) this.db = initDb(this.projectId);
+    if (!this.db) this.db = getSharedDb(this.projectId);
 
     // 只查询 path 字段
     const rows = this.db.prepare('SELECT path FROM files').all() as { path: string }[];
@@ -84,12 +85,12 @@ export class GraphExpander {
    * 扩展 seed chunks
    */
   async expand(seeds: ScoredChunk[], queryTokens?: Set<string>): Promise<ExpandResult> {
-    if (!this.vectorStore || !this.db) {
-      await this.init();
-    }
+    // scan() 会关闭 VectorStore，每次扩展从工厂重新获取有效实例。
+    await this.init();
 
-    // 确保文件索引已加载 (供 E3 使用)
-    this.loadFileIndex();
+    // 每次检索刷新文件集合，避免增量索引后解析过期路径。
+    this.invalidateFileIndex();
+    if (this.config.importFilesPerSeed > 0) this.loadFileIndex();
 
     const stats = {
       neighborCount: 0,
@@ -329,6 +330,8 @@ export class GraphExpander {
   ): Promise<ScoredChunk[]> {
     const result: ScoredChunk[] = [];
     const { importFilesPerSeed, chunksPerImportFile, decayImport, decayDepth } = this.config;
+    if (importFilesPerSeed <= 0) return result;
+    const selectedByKey = new Map<string, ScoredChunk>();
     const seedScoreByFile = this.buildSeedScoreByFile(seeds);
     const queue: Array<{ filePath: string; depth: number; seedScore: number }> = [];
     const visited = new Set<string>();
@@ -392,13 +395,21 @@ export class GraphExpander {
           const key = `${targetPath}#${chunk.chunk_index}`;
           if (existingKeys.has(key)) continue;
 
-          result.push({
-            filePath: targetPath,
-            chunkIndex: chunk.chunk_index,
-            score: seedScore * decayImport * depthDecay,
-            source: 'import',
-            record: { ...chunk, _distance: 0 },
-          });
+          const score = seedScore * decayImport * depthDecay;
+          const previous = selectedByKey.get(key);
+          if (previous) {
+            previous.score = Math.max(previous.score, score);
+          } else {
+            const selected: ScoredChunk = {
+              filePath: targetPath,
+              chunkIndex: chunk.chunk_index,
+              score,
+              source: 'import',
+              record: { ...chunk, _distance: 0 },
+            };
+            selectedByKey.set(key, selected);
+            result.push(selected);
+          }
         }
 
         importCount++;
@@ -492,9 +503,7 @@ export class GraphExpander {
 
     for (const token of queryTokens) {
       if (text.includes(token)) {
-        const wordBoundaryRegex = new RegExp(
-          `\\b${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
-        );
+        const wordBoundaryRegex = getTokenBoundaryRegex(token);
         if (wordBoundaryRegex.test(text)) {
           score += 1;
         } else {

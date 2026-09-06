@@ -10,6 +10,7 @@ import Parser from '@keqingmoe/tree-sitter';
 // 语言到语法模块的映射
 const GRAMMAR_MODULES: Record<string, string> = {
   typescript: 'tree-sitter-typescript',
+  tsx: 'tree-sitter-typescript',
   javascript: 'tree-sitter-javascript',
   python: 'tree-sitter-python',
   go: 'tree-sitter-go',
@@ -21,6 +22,7 @@ const GRAMMAR_MODULES: Record<string, string> = {
 };
 
 // 缓存已加载的语法
+// 复用当前 tree-sitter 提供的语法类型，与 Parser.setLanguage 保持一致。
 type TreeSitterLanguage = Parser.Language;
 const loadedGrammars: Map<string, TreeSitterLanguage> = new Map();
 
@@ -49,8 +51,8 @@ async function loadGrammar(language: string): Promise<TreeSitterLanguage | null>
     let grammar: TreeSitterLanguage | null = null;
 
     // tree-sitter-typescript 包特殊处理（包含 typescript 和 tsx 两个语言）
-    if (language === 'typescript') {
-      grammar = grammarModule.default?.typescript ?? grammarModule.typescript;
+    if (language === 'typescript' || language === 'tsx') {
+      grammar = grammarModule.default?.[language] ?? grammarModule[language];
     } else {
       // 其他语言包: 0.20.x 版本直接使用 default export
       const exported = grammarModule.default ?? grammarModule;
@@ -97,6 +99,9 @@ export async function getParser(language: string): Promise<Parser | null> {
   // 加载语法
   const grammar = await loadGrammar(language);
   if (!grammar) return null;
+  // 首批文件会并发等待同一 grammar；恢复后再次检查，避免重复创建 native Parser。
+  const initialized = parserCache.get(language);
+  if (initialized) return initialized;
 
   // 创建解析器
   const parser = new Parser();
