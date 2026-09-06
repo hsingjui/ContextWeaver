@@ -128,21 +128,21 @@ export async function startMcpServer(): Promise<void> {
     // 创建进度通知回调
     const onProgress = progressToken
       ? async (current: number, total?: number, message?: string) => {
-        try {
-          await extra.sendNotification({
-            method: 'notifications/progress',
-            params: {
-              progressToken,
-              progress: current,
-              total,
-              message,
-            },
-          });
-        } catch (err) {
-          // 忽略通知发送失败，不影响主流程
-          logger.debug({ error: (err as Error).message }, '发送进度通知失败');
+          try {
+            await extra.sendNotification({
+              method: 'notifications/progress',
+              params: {
+                progressToken,
+                progress: current,
+                total,
+                message,
+              },
+            });
+          } catch (err) {
+            // 忽略通知发送失败，不影响主流程
+            logger.debug({ error: (err as Error).message }, '发送进度通知失败');
+          }
         }
-      }
       : undefined;
 
     try {

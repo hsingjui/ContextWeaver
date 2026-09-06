@@ -1,15 +1,12 @@
 {
-    "$schema": "https://unpkg.com/knip@5/schema.json",
+    "$schema": "https://unpkg.com/knip@6/schema.json",
     "entry": [
         "src/index.ts"
     ],
     "project": [
         "src/**/*.{ts,tsx!}"
     ],
-    "ignore": [
-        "**/*.d.ts",
-        "scripts/**"
-    ],
+    "ignore": [],
     "ignoreDependencies": [
         "tree-sitter-go",
         "tree-sitter-java",

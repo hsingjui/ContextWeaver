@@ -21,8 +21,7 @@ const GRAMMAR_MODULES: Record<string, string> = {
 };
 
 // 缓存已加载的语法
-// tree-sitter Language 类型是原生对象，没有导出类型定义
-type TreeSitterLanguage = unknown;
+type TreeSitterLanguage = Parser.Language;
 const loadedGrammars: Map<string, TreeSitterLanguage> = new Map();
 
 // 缓存已初始化的解析器

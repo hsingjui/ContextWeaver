@@ -184,13 +184,11 @@ cli
 
       const { handleCodebaseRetrieval } = await import('./mcp/tools/codebaseRetrieval.js');
 
-      const response = await handleCodebaseRetrieval(
-        {
-          repo_path: repoPath,
-          information_request: informationRequest,
-          technical_terms: technicalTerms.length > 0 ? technicalTerms : undefined,
-        },
-      );
+      const response = await handleCodebaseRetrieval({
+        repo_path: repoPath,
+        information_request: informationRequest,
+        technical_terms: technicalTerms.length > 0 ? technicalTerms : undefined,
+      });
 
       const text = response.content.map((item) => item.text).join('\n');
       process.stdout.write(`${text}\n`);

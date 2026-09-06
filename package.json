@@ -16,34 +16,33 @@
     "cw": "dist/index.js"
   },
   "files": [
-    "dist/**/*.js",
-    "dist/**/*.d.ts"
+    "dist/**/*.js"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
-    "build": "tsup src/index.ts src/mcp/main.ts --format esm --dts --out-dir dist --sourcemap --clean",
-    "build:release": "tsup src/index.ts src/mcp/main.ts --format esm --dts --out-dir dist --clean",
-    "dev": "tsup src/index.ts src/mcp/main.ts --format esm --dts --out-dir dist --sourcemap --watch",
+    "build": "tsup src/index.ts src/mcp/main.ts --format esm --out-dir dist --sourcemap --clean && tsc --noEmit",
+    "build:release": "tsup src/index.ts src/mcp/main.ts --format esm --out-dir dist --clean",
+    "dev": "tsup src/index.ts src/mcp/main.ts --format esm --out-dir dist --sourcemap --watch",
     "fmt": "biome check --write ./src",
     "test": "node --test --import tsx tests/*.test.ts"
   },
   "dependencies": {
     "@keqingmoe/tree-sitter": "^0.26.2",
-    "@lancedb/lancedb": "^0.22.0",
-    "@modelcontextprotocol/sdk": "^1.25.1",
-    "better-sqlite3": "^12.2.0",
-    "cac": "^6.7.14",
-    "chardet": "^2.1.1",
-    "dotenv": "^17.2.3",
+    "@lancedb/lancedb": "^0.38.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "better-sqlite3": "^13.0.3",
+    "cac": "^7.0.0",
+    "chardet": "^2.2.0",
+    "dotenv": "^17.4.2",
     "fdir": "^6.5.0",
-    "iconv-lite": "^0.7.1",
-    "ignore": "^7.0.5",
-    "p-limit": "^7.2.0",
-    "pino": "^10.1.0",
+    "iconv-lite": "^0.7.3",
+    "ignore": "^7.0.8",
+    "p-limit": "^7.3.2",
+    "pino": "^10.3.1",
     "tree-sitter-c": "^0.24.1",
-    "tree-sitter-c-sharp": "^0.23.1",
+    "tree-sitter-c-sharp": "^0.23.5",
     "tree-sitter-cpp": "^0.23.4",
     "tree-sitter-go": "0.25.0",
     "tree-sitter-java": "0.23.5",
@@ -54,19 +53,22 @@
     "zod": "^4.2.1"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.3.10",
-    "@types/better-sqlite3": "^7.6.13",
+    "@biomejs/biome": "2.5.12",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.0.0",
-    "knip": "^5.78.0",
+    "knip": "^6.34.0",
     "tsup": "^8.5.1",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
       "@keqingmoe/tree-sitter",
       "better-sqlite3",
       "esbuild",
+      "onnxruntime-node",
+      "protobufjs",
+      "sharp",
       "tree-sitter-c",
       "tree-sitter-c-sharp",
       "tree-sitter-cpp",

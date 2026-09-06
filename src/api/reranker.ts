@@ -70,7 +70,8 @@ function extractErrorMessage(payload: unknown): string | null {
 function isRerankResponse(payload: unknown): payload is RerankResponse {
   if (!isRecord(payload) || !Array.isArray(payload.results)) return false;
   return payload.results.every(
-    (item) => isRecord(item) && typeof item.index === 'number' && typeof item.relevance_score === 'number',
+    (item) =>
+      isRecord(item) && typeof item.index === 'number' && typeof item.relevance_score === 'number',
   );
 }
 
@@ -236,7 +237,8 @@ export class RerankerClient {
         const lowerMessage = message.toLowerCase();
         const isRateLimited = lowerMessage.includes('429') || lowerMessage.includes('rate');
         // SiliconFlow 超长输入返回 "input must have less than" 或 413
-        const isInputTooLong = lowerMessage.includes('input must have less than') || lowerMessage.includes('413');
+        const isInputTooLong =
+          lowerMessage.includes('input must have less than') || lowerMessage.includes('413');
         const isResponseInvalid =
           message.includes('响应非 JSON') ||
           message.includes('响应结构异常') ||

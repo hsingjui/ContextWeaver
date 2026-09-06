@@ -182,7 +182,12 @@ const LANGUAGE_SPECS: Record<string, LanguageSpecConfig> = {
       'type_definition',
     ]),
     nameFields: ['declarator', 'name'],
-    nameNodeTypes: new Set(['identifier', 'type_identifier', 'field_identifier', 'namespace_identifier']),
+    nameNodeTypes: new Set([
+      'identifier',
+      'type_identifier',
+      'field_identifier',
+      'namespace_identifier',
+    ]),
     prefixMap: {
       function_definition: '',
       class_specifier: 'class ',

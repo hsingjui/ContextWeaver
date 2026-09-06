@@ -140,10 +140,7 @@ export class Indexer {
     // 避免这些文件在下一轮被持续判定为“需要自愈”
     if (noChunkSettled.length > 0) {
       batchUpdateVectorIndexHash(db, noChunkSettled);
-      logger.debug(
-        { count: noChunkSettled.length },
-        '无可索引 chunk，标记向量索引状态为已收敛',
-      );
+      logger.debug({ count: noChunkSettled.length }, '无可索引 chunk，标记向量索引状态为已收敛');
     }
 
     // 批量处理需要索引的文件

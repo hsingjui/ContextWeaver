@@ -193,10 +193,7 @@ export function getEmbeddingConfig(): EmbeddingConfig {
   const dimensions = parseInt(process.env.EMBEDDINGS_DIMENSIONS || '1024', 10);
   const contextTokens = maxContextTokens ?? DEFAULT_EMBEDDING_CONTEXT_TOKENS;
   const maxInputChars = Math.max(500, Math.floor(contextTokens * EMBEDDING_INPUT_CHAR_RATIO));
-  const maxBatchChars = Math.max(
-    maxInputChars,
-    maxInputChars * EMBEDDING_BATCH_CHAR_MULTIPLIER,
-  );
+  const maxBatchChars = Math.max(maxInputChars, maxInputChars * EMBEDDING_BATCH_CHAR_MULTIPLIER);
 
   return {
     apiKey,

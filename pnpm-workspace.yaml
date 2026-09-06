@@ -1,0 +1,16 @@
+allowBuilds:
+  '@keqingmoe/tree-sitter': true
+  better-sqlite3: true
+  esbuild: true
+  onnxruntime-node: true
+  protobufjs: true
+  sharp: true
+  tree-sitter-c: true
+  tree-sitter-c-sharp: true
+  tree-sitter-cpp: true
+  tree-sitter-go: true
+  tree-sitter-java: true
+  tree-sitter-javascript: true
+  tree-sitter-python: true
+  tree-sitter-rust: true
+  tree-sitter-typescript: true

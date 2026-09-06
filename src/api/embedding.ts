@@ -298,7 +298,7 @@ class RateLimitController {
     );
 
     // 创建暂停 Promise
-    let resumeResolve: () => void = () => { };
+    let resumeResolve: () => void = () => {};
     this.pausePromise = new Promise<void>((resolve) => {
       resumeResolve = resolve;
     });
@@ -389,9 +389,7 @@ export class EmbeddingClient {
       const batches = this.createBatches(texts, batchSize);
       const progress = new ProgressTracker(batches.length, onProgress);
       const batchResults = await Promise.all(
-        batches.map((batch) =>
-          this.processWithRateLimit(batch.texts, batch.startIndex, progress),
-        ),
+        batches.map((batch) => this.processWithRateLimit(batch.texts, batch.startIndex, progress)),
       );
       progress.complete();
       return batchResults.flat().sort((left, right) => left.index - right.index);
@@ -406,9 +404,7 @@ export class EmbeddingClient {
 
     // 使用速率限制控制器处理各批次
     const batchResults = await Promise.all(
-      batches.map((batch) =>
-        this.processWithRateLimit(batch.texts, batch.startIndex, progress),
-      ),
+      batches.map((batch) => this.processWithRateLimit(batch.texts, batch.startIndex, progress)),
     );
 
     // 输出完成统计

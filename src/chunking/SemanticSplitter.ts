@@ -515,7 +515,6 @@ export class SemanticSplitter {
     // 确保不会超出文件开头
     return Math.max(0, result);
   }
-
 }
 
 /**
