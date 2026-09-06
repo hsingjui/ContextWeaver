@@ -116,14 +116,8 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
       filePaths.map((p) => path.relative(rootPath, p).replace(/\\/g, '/')),
     );
 
-    // 处理文件（文件处理很快，不需要报告进度）
-    const results: ProcessResult[] = [];
-    const batchSize = 100;
-    for (let i = 0; i < filePaths.length; i += batchSize) {
-      const batch = filePaths.slice(i, i + batchSize);
-      const batchResults = await processFiles(rootPath, batch, knownFiles);
-      results.push(...batchResults);
-    }
+    // 处理文件（使用全局并发队列，避免批次栅栏导致吞吐下降）
+    const results = await processFiles(rootPath, filePaths, knownFiles);
 
     // 准备数据库操作
     const toAdd: FileMeta[] = [];
