@@ -26,7 +26,8 @@
     "build": "tsup src/index.ts src/mcp/main.ts --format esm --dts --out-dir dist --sourcemap --clean",
     "build:release": "tsup src/index.ts src/mcp/main.ts --format esm --dts --out-dir dist --clean",
     "dev": "tsup src/index.ts src/mcp/main.ts --format esm --dts --out-dir dist --sourcemap --watch",
-    "fmt": "biome check --write ./src"
+    "fmt": "biome check --write ./src",
+    "test": "node --test --import tsx tests/*.test.ts"
   },
   "dependencies": {
     "@keqingmoe/tree-sitter": "^0.26.2",
@@ -58,6 +59,7 @@
     "@types/node": "^24.0.0",
     "knip": "^5.78.0",
     "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   },
   "pnpm": {

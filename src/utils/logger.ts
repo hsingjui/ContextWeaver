@@ -84,12 +84,41 @@ function cleanupOldLogs(dir: string): void {
 function createFormattedStream(filePath: string): Writable {
   const writeStream = fs.createWriteStream(filePath, { flags: 'a' });
 
+  let disabled = false;
+  const disableWriteStream = (err?: { message?: string }) => {
+    if (disabled) return;
+    disabled = true;
+    if (!writeStream.destroyed) {
+      writeStream.destroy();
+    }
+    // 使用 console.error 避免污染 stdout（MCP 模式需要纯净的 stdout）
+    console.error(`[Logger] 日志写入失败，降级为仅控制台输出: ${err?.message ?? 'unknown error'}`);
+  };
+
+  writeStream.on('error', (err) => {
+    disableWriteStream(err);
+  });
+
   return new Writable({
     write(
       chunk: Buffer | string,
       _encoding: BufferEncoding,
       callback: (error?: Error | null) => void,
     ) {
+      if (disabled || writeStream.destroyed || !writeStream.writable) {
+        callback();
+        return;
+      }
+
+      const handleWrite = (line: string) => {
+        writeStream.write(line, (err) => {
+          if (err) {
+            disableWriteStream(err);
+          }
+          callback();
+        });
+      };
+
       try {
         const log = JSON.parse(chunk.toString());
         const time = formatTime();
@@ -105,10 +134,17 @@ function createFormattedStream(filePath: string): Writable {
           line += ` ${JSON.stringify(extra)}`;
         }
 
-        writeStream.write(`${line}\n`, callback);
+        handleWrite(`${line}\n`);
       } catch {
-        writeStream.write(chunk.toString(), callback);
+        handleWrite(chunk.toString());
       }
+    },
+    final(callback: (error?: Error | null) => void) {
+      if (disabled || writeStream.destroyed || !writeStream.writable) {
+        callback();
+        return;
+      }
+      writeStream.end(callback);
     },
   });
 }

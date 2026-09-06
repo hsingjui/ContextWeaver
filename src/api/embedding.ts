@@ -33,18 +33,9 @@ interface EmbeddingResponse {
   object: 'list';
   data: EmbeddingData[];
   model: string;
-  usage: {
-    prompt_tokens: number;
-    total_tokens: number;
-  };
-}
-
-/** Embedding 错误响应 */
-interface EmbeddingErrorResponse {
-  error?: {
-    message: string;
-    type?: string;
-    code?: string;
+  usage?: {
+    prompt_tokens?: number;
+    total_tokens?: number;
   };
 }
 
@@ -53,6 +44,50 @@ export interface EmbeddingResult {
   text: string;
   embedding: number[];
   index: number;
+}
+
+interface ExpandedEmbeddingInputs {
+  texts: string[];
+  originalIndexes: number[];
+}
+
+interface EmbeddingBatch {
+  texts: string[];
+  startIndex: number;
+}
+
+/** 检查值是否为普通对象 */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/** 从 SiliconFlow API 响应中提取错误消息 */
+function extractErrorMessage(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  const msg = payload.message;
+  if (typeof msg === 'string' && msg.trim()) {
+    return msg.trim();
+  }
+  const nestedError = payload.error;
+  if (isRecord(nestedError)) {
+    const nestedMessage = nestedError.message;
+    if (typeof nestedMessage === 'string' && nestedMessage.trim()) {
+      return nestedMessage.trim();
+    }
+  }
+  return null;
+}
+
+/** 校验 Embedding API 响应结构 */
+function isEmbeddingResponse(payload: unknown): payload is EmbeddingResponse {
+  if (!isRecord(payload) || !Array.isArray(payload.data)) return false;
+  return payload.data.every(
+    (item) =>
+      isRecord(item) &&
+      typeof item.index === 'number' &&
+      Array.isArray(item.embedding) &&
+      item.embedding.every((v) => typeof v === 'number'),
+  );
 }
 
 /**
@@ -90,6 +125,15 @@ class ProgressTracker {
     if (now - this.lastLogTime >= this.logIntervalMs) {
       this.logProgress();
       this.lastLogTime = now;
+    }
+  }
+
+  /**
+   * 扩展总批次数（用于长度错误二分重试时修正进度）
+   */
+  expandTotal(extra: number): void {
+    if (extra > 0) {
+      this.total += extra;
     }
   }
 
@@ -341,32 +385,225 @@ export class EmbeddingClient {
       return [];
     }
 
-    // 将文本分批
-    const batches: string[][] = [];
-    for (let i = 0; i < texts.length; i += batchSize) {
-      batches.push(texts.slice(i, i + batchSize));
+    if (!this.config.autoSplitLongText) {
+      const batches = this.createBatches(texts, batchSize);
+      const progress = new ProgressTracker(batches.length, onProgress);
+      const batchResults = await Promise.all(
+        batches.map((batch) =>
+          this.processWithRateLimit(batch.texts, batch.startIndex, progress),
+        ),
+      );
+      progress.complete();
+      return batchResults.flat().sort((left, right) => left.index - right.index);
     }
+
+    // 超长文本先拆分，再按字符预算动态分批，避免请求体过大触发 500
+    const expanded = this.expandInputs(texts);
+    const batches = this.createBatches(expanded.texts, batchSize);
 
     // 创建进度追踪器（传入外部回调）
     const progress = new ProgressTracker(batches.length, onProgress);
 
     // 使用速率限制控制器处理各批次
     const batchResults = await Promise.all(
-      batches.map((batch, batchIndex) =>
-        this.processWithRateLimit(batch, batchIndex * batchSize, progress),
+      batches.map((batch) =>
+        this.processWithRateLimit(batch.texts, batch.startIndex, progress),
       ),
     );
 
     // 输出完成统计
     progress.complete();
 
-    // 扁平化结果
-    return batchResults.flat();
+    // expandedIndex -> embedding 映射
+    const flattened = batchResults.flat();
+    const embeddingByExpandedIndex: Array<number[] | undefined> = new Array(expanded.texts.length);
+    for (const result of flattened) {
+      embeddingByExpandedIndex[result.index] = result.embedding;
+    }
+
+    // 原始文本索引 -> expanded 索引列表
+    const expandedIndexesByOriginal: number[][] = Array.from({ length: texts.length }, () => []);
+    for (let expandedIndex = 0; expandedIndex < expanded.originalIndexes.length; expandedIndex++) {
+      const originalIndex = expanded.originalIndexes[expandedIndex];
+      expandedIndexesByOriginal[originalIndex].push(expandedIndex);
+    }
+
+    // 聚合回原始文本：单段直接返回，多段取均值向量
+    const merged: EmbeddingResult[] = [];
+    for (let originalIndex = 0; originalIndex < texts.length; originalIndex++) {
+      const expandedIndexes = expandedIndexesByOriginal[originalIndex];
+      if (expandedIndexes.length === 0) {
+        throw new Error(`Embedding 结果缺失: text#${originalIndex}`);
+      }
+
+      const vectors: number[][] = [];
+      for (const expandedIndex of expandedIndexes) {
+        const embedding = embeddingByExpandedIndex[expandedIndex];
+        if (!embedding) {
+          throw new Error(`Embedding 结果缺失: expanded#${expandedIndex}`);
+        }
+        vectors.push(embedding);
+      }
+
+      merged.push({
+        text: texts[originalIndex],
+        embedding: vectors.length === 1 ? vectors[0] : this.averageEmbeddings(vectors),
+        index: originalIndex,
+      });
+    }
+
+    return merged;
   }
 
   /**
-   * 带速率限制和网络错误重试的批次处理
-   * 使用循环而非递归，避免栈溢出和槽位泄漏
+   * 将原始输入展开为可安全发送到 Embedding API 的输入序列
+   */
+  private expandInputs(texts: string[]): ExpandedEmbeddingInputs {
+    const expandedTexts: string[] = [];
+    const originalIndexes: number[] = [];
+
+    let oversizedCount = 0;
+    let extraSegments = 0;
+
+    for (let originalIndex = 0; originalIndex < texts.length; originalIndex++) {
+      const segments = this.splitLongText(texts[originalIndex], this.config.maxInputChars);
+      if (segments.length > 1) {
+        oversizedCount++;
+        extraSegments += segments.length - 1;
+      }
+
+      for (const segment of segments) {
+        expandedTexts.push(segment);
+        originalIndexes.push(originalIndex);
+      }
+    }
+
+    if (oversizedCount > 0) {
+      logger.warn(
+        {
+          oversizedTexts: oversizedCount,
+          extraSegments,
+          maxInputChars: this.config.maxInputChars,
+        },
+        '检测到超长输入，已自动拆分并聚合向量',
+      );
+    }
+
+    return { texts: expandedTexts, originalIndexes };
+  }
+
+  /**
+   * 按「最大条数 + 最大字符预算」动态分批
+   */
+  private createBatches(texts: string[], maxBatchSize: number): EmbeddingBatch[] {
+    const batches: EmbeddingBatch[] = [];
+    const safeBatchSize = Math.max(1, maxBatchSize);
+    const maxBatchChars = Math.max(this.config.maxBatchChars, this.config.maxInputChars);
+
+    let current: string[] = [];
+    let currentChars = 0;
+    let startIndex = 0;
+
+    for (const text of texts) {
+      const nextChars = text.length;
+      const exceedsSize = current.length >= safeBatchSize;
+      const exceedsChars = current.length > 0 && currentChars + nextChars > maxBatchChars;
+
+      if (exceedsSize || exceedsChars) {
+        batches.push({ texts: current, startIndex });
+        startIndex += current.length;
+        current = [];
+        currentChars = 0;
+      }
+
+      current.push(text);
+      currentChars += nextChars;
+    }
+
+    if (current.length > 0) {
+      batches.push({ texts: current, startIndex });
+    }
+
+    return batches;
+  }
+
+  /**
+   * 拆分超长文本，优先按行断开，保留 Context 前缀
+   */
+  private splitLongText(text: string, maxChars: number): string[] {
+    if (text.length <= maxChars) {
+      return [text];
+    }
+
+    let prefix = '';
+    let body = text;
+    if (text.startsWith('// Context:')) {
+      const newlineIndex = text.indexOf('\n');
+      if (newlineIndex !== -1) {
+        prefix = text.slice(0, newlineIndex + 1);
+        body = text.slice(newlineIndex + 1);
+      }
+    }
+
+    let bodyBudget = maxChars - prefix.length;
+    if (bodyBudget < 200) {
+      prefix = '';
+      body = text;
+      bodyBudget = maxChars;
+    }
+
+    const segments: string[] = [];
+    let cursor = 0;
+
+    while (cursor < body.length) {
+      let end = Math.min(body.length, cursor + bodyBudget);
+      if (end < body.length) {
+        const lineBreak = body.lastIndexOf('\n', end);
+        if (lineBreak > cursor + Math.floor(bodyBudget * 0.6)) {
+          end = lineBreak;
+        }
+      }
+
+      if (end <= cursor) {
+        end = Math.min(body.length, cursor + bodyBudget);
+      }
+
+      const segmentBody = body.slice(cursor, end);
+      segments.push(prefix ? `${prefix}${segmentBody}` : segmentBody);
+      cursor = end;
+    }
+
+    return segments.length > 0 ? segments : [text.slice(0, maxChars)];
+  }
+
+  /**
+   * 多段向量均值聚合
+   */
+  private averageEmbeddings(vectors: number[][]): number[] {
+    const dim = vectors[0]?.length ?? 0;
+    if (dim === 0) {
+      throw new Error('Embedding 维度无效');
+    }
+
+    const merged = new Array<number>(dim).fill(0);
+    for (const vector of vectors) {
+      if (vector.length !== dim) {
+        throw new Error(`Embedding 维度不一致: expected=${dim}, actual=${vector.length}`);
+      }
+      for (let i = 0; i < dim; i++) {
+        merged[i] += vector[i];
+      }
+    }
+
+    for (let i = 0; i < dim; i++) {
+      merged[i] /= vectors.length;
+    }
+    return merged;
+  }
+
+  /**
+   * 带速率限制和错误重试的批次处理
+   * 普通重试使用循环；长度错误时走二分递归拆分
    */
   private async processWithRateLimit(
     texts: string[],
@@ -391,6 +628,7 @@ export class EmbeddingClient {
         const errorMessage = error.message || '';
         const isRateLimited = errorMessage.includes('429') || errorMessage.includes('rate');
         const isNetworkError = this.isNetworkError(err);
+        const isInputTooLong = this.isInputTooLongError(err);
 
         if (isRateLimited) {
           // 429 错误：释放槽位，触发全局暂停
@@ -398,6 +636,9 @@ export class EmbeddingClient {
           await this.rateLimiter.triggerRateLimit();
           networkRetries = 0; // 重置网络重试计数
           // 循环继续，重新获取槽位并重试
+        } else if (isInputTooLong) {
+          this.rateLimiter.releaseFailure();
+          return this.retryWithBinarySplit(texts, startIndex, progress, errorMessage);
         } else if (isNetworkError && networkRetries < MAX_NETWORK_RETRIES) {
           // 网络错误：指数退避重试
           networkRetries++;
@@ -428,6 +669,94 @@ export class EmbeddingClient {
         }
       }
     }
+  }
+
+  /**
+   * 长度错误自动二分重试
+   *
+   * - 多条输入：按条目二分
+   * - 单条输入：按字符二分并最终聚合向量
+   */
+  private async retryWithBinarySplit(
+    texts: string[],
+    startIndex: number,
+    progress: ProgressTracker,
+    errorMessage: string,
+  ): Promise<EmbeddingResult[]> {
+    if (texts.length > 1) {
+      const mid = Math.floor(texts.length / 2);
+      if (mid <= 0 || mid >= texts.length) {
+        throw new Error(`Embedding 批次二分失败: size=${texts.length}`);
+      }
+
+      progress.expandTotal(1); // 1 个失败批次替换为 2 个子批次
+      logger.warn(
+        {
+          size: texts.length,
+          left: mid,
+          right: texts.length - mid,
+          startIndex,
+          error: errorMessage,
+        },
+        'Embedding 批次过长，自动二分重试',
+      );
+
+      const [left, right] = await Promise.all([
+        this.processWithRateLimit(texts.slice(0, mid), startIndex, progress),
+        this.processWithRateLimit(texts.slice(mid), startIndex + mid, progress),
+      ]);
+      return [...left, ...right];
+    }
+
+    const text = texts[0] || '';
+    if (text.length <= 1) {
+      throw new Error(`Embedding 文本过短且仍触发长度错误: index=${startIndex}`);
+    }
+
+    let targetChars = Math.max(100, Math.floor(text.length / 2));
+    if (targetChars >= text.length) {
+      targetChars = Math.max(1, text.length - 1);
+    }
+    const segments = this.splitLongText(text, targetChars);
+    if (segments.length <= 1) {
+      throw new Error(`Embedding 文本二分失败: index=${startIndex}, length=${text.length}`);
+    }
+
+    progress.expandTotal(segments.length - 1); // 1 个失败批次替换为 N 个子批次
+    logger.warn(
+      {
+        index: startIndex,
+        originalLength: text.length,
+        segmentCount: segments.length,
+        targetChars,
+        error: errorMessage,
+      },
+      'Embedding 单条文本过长，自动拆分并聚合重试',
+    );
+
+    const vectors: number[][] = [];
+    for (const segment of segments) {
+      const result = await this.processWithRateLimit([segment], startIndex, progress);
+      const embedding = result[0]?.embedding;
+      if (!embedding) {
+        throw new Error(`Embedding 子分片结果缺失: index=${startIndex}`);
+      }
+      vectors.push(embedding);
+    }
+
+    return [
+      {
+        text,
+        embedding: this.averageEmbeddings(vectors),
+        index: startIndex,
+      },
+    ];
+  }
+
+  /** 判断是否为输入长度超限错误 (SiliconFlow: HTTP 413 + "input must have less than") */
+  private isInputTooLongError(err: unknown): boolean {
+    const msg = (err as { message?: string }).message?.toLowerCase() || '';
+    return msg.includes('input must have less than') || msg.includes('413');
   }
 
   /**
@@ -488,6 +817,8 @@ export class EmbeddingClient {
       encoding_format: 'float',
     };
 
+    const startTime = Date.now();
+
     const response = await fetch(this.config.baseUrl, {
       method: 'POST',
       headers: {
@@ -497,21 +828,73 @@ export class EmbeddingClient {
       body: JSON.stringify(requestBody),
     });
 
-    const data = (await response.json()) as EmbeddingResponse & EmbeddingErrorResponse;
+    const latencyMs = Date.now() - startTime;
+    const traceId = response.headers.get('x-siliconcloud-trace-id') || undefined;
 
-    if (!response.ok || data.error) {
-      const errorMsg = data.error?.message || `HTTP ${response.status}`;
-      throw new Error(`Embedding API 错误: ${errorMsg}`);
+    const rawBody = await response.text();
+    let parsedBody: unknown = null;
+    if (rawBody) {
+      try {
+        parsedBody = JSON.parse(rawBody) as unknown;
+      } catch {
+        if (response.ok) {
+          logger.error(
+            { status: response.status, latencyMs, traceId, response: rawBody },
+            'Embedding API 响应解析失败',
+          );
+          throw new Error(`Embedding API 错误: 响应非 JSON - ${rawBody}`);
+        }
+      }
     }
 
-    const results: EmbeddingResult[] = data.data.map((item) => ({
-      text: texts[item.index],
-      embedding: item.embedding,
-      index: startIndex + item.index,
-    }));
+    if (!response.ok) {
+      const detail = extractErrorMessage(parsedBody) || rawBody || `HTTP ${response.status}`;
+      logger.error(
+        { status: response.status, latencyMs, traceId, response: detail },
+        'Embedding API 错误',
+      );
+      throw new Error(`Embedding API 错误: HTTP ${response.status} - ${detail}`);
+    }
+
+    if (!parsedBody) {
+      logger.error(
+        { status: response.status, latencyMs, traceId, response: rawBody },
+        'Embedding API 响应解析失败',
+      );
+      throw new Error(`Embedding API 错误: 响应非 JSON - ${rawBody}`);
+    }
+
+    const errMsg = extractErrorMessage(parsedBody);
+    if (errMsg) {
+      logger.error(
+        { status: response.status, latencyMs, traceId, response: errMsg },
+        'Embedding API 返回错误',
+      );
+      throw new Error(`Embedding API 错误: ${errMsg}`);
+    }
+
+    if (!isEmbeddingResponse(parsedBody)) {
+      logger.error(
+        { status: response.status, latencyMs, traceId, response: rawBody },
+        'Embedding API 响应结构异常',
+      );
+      throw new Error(`Embedding API 错误: 响应结构异常 - ${rawBody}`);
+    }
+
+    const results: EmbeddingResult[] = parsedBody.data.map((item) => {
+      const text = texts[item.index];
+      if (typeof text !== 'string') {
+        throw new Error(`Embedding API 错误: 响应索引越界 index=${item.index}`);
+      }
+      return {
+        text,
+        embedding: item.embedding,
+        index: startIndex + item.index,
+      };
+    });
 
     // 记录批次完成（进度追踪器会定时输出）
-    progress.recordBatch(data.usage?.total_tokens || 0);
+    progress.recordBatch(parsedBody.usage?.total_tokens || 0);
 
     return results;
   }

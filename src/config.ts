@@ -59,6 +59,12 @@ export interface EmbeddingConfig {
   maxConcurrency: number;
   /** 向量维度 */
   dimensions: number;
+  /** 单条文本最大字符数（超出会拆分） */
+  maxInputChars: number;
+  /** 单次请求最大字符预算（用于动态分批） */
+  maxBatchChars: number;
+  /** 是否自动预拆分超长文本 */
+  autoSplitLongText: boolean;
 }
 
 export interface RerankerConfig {
@@ -82,6 +88,37 @@ export interface EnvCheckResult {
  * 默认的 API Key 占位符（未修改则视为未配置）
  */
 const DEFAULT_API_KEY_PLACEHOLDER = 'your-api-key-here';
+
+/**
+ * Embedding 模型上下文窗口默认值（tokens）
+ */
+const DEFAULT_EMBEDDING_CONTEXT_TOKENS = 8192;
+
+/**
+ * token -> char 的保守换算比例
+ * 目标：在未知 tokenizer 的情况下优先保证不超限
+ */
+const EMBEDDING_INPUT_CHAR_RATIO = 0.98;
+
+/**
+ * 单次请求字符预算默认倍数（相对单条输入）
+ */
+const EMBEDDING_BATCH_CHAR_MULTIPLIER = 3;
+
+function parsePositiveInt(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const value = parseInt(raw, 10);
+  if (Number.isNaN(value) || value <= 0) return null;
+  return value;
+}
+
+function parseBoolean(raw: string | undefined): boolean | null {
+  if (!raw) return null;
+  const normalized = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return null;
+}
 
 /**
  * 检查 Embedding 相关环境变量是否已配置（不抛出错误）
@@ -140,6 +177,8 @@ export function getEmbeddingConfig(): EmbeddingConfig {
   const baseUrl = process.env.EMBEDDINGS_BASE_URL;
   const model = process.env.EMBEDDINGS_MODEL;
   const maxConcurrency = parseInt(process.env.EMBEDDINGS_MAX_CONCURRENCY || '10', 10);
+  const maxContextTokens = parsePositiveInt(process.env.EMBEDDINGS_MAX_CONTEXT_TOKENS);
+  const autoSplitLongText = parseBoolean(process.env.EMBEDDINGS_AUTO_SPLIT_LONG_TEXT);
 
   if (!apiKey) {
     throw new Error('EMBEDDINGS_API_KEY 环境变量未设置');
@@ -152,6 +191,12 @@ export function getEmbeddingConfig(): EmbeddingConfig {
   }
 
   const dimensions = parseInt(process.env.EMBEDDINGS_DIMENSIONS || '1024', 10);
+  const contextTokens = maxContextTokens ?? DEFAULT_EMBEDDING_CONTEXT_TOKENS;
+  const maxInputChars = Math.max(500, Math.floor(contextTokens * EMBEDDING_INPUT_CHAR_RATIO));
+  const maxBatchChars = Math.max(
+    maxInputChars,
+    maxInputChars * EMBEDDING_BATCH_CHAR_MULTIPLIER,
+  );
 
   return {
     apiKey,
@@ -159,6 +204,9 @@ export function getEmbeddingConfig(): EmbeddingConfig {
     model,
     maxConcurrency: Number.isNaN(maxConcurrency) ? 4 : maxConcurrency,
     dimensions: Number.isNaN(dimensions) ? 1024 : dimensions,
+    maxInputChars,
+    maxBatchChars,
+    autoSplitLongText: autoSplitLongText ?? true,
   };
 }
 

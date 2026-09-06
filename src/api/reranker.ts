@@ -44,13 +44,34 @@ interface RerankResponse {
   };
 }
 
-/** Rerank 错误响应 */
-interface RerankErrorResponse {
-  error?: {
-    message: string;
-    type?: string;
-    code?: string;
-  };
+/** 检查值是否为普通对象 */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/** 从 SiliconFlow API 响应中提取错误消息 */
+function extractErrorMessage(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  const msg = payload.message;
+  if (typeof msg === 'string' && msg.trim()) {
+    return msg.trim();
+  }
+  const nestedError = payload.error;
+  if (isRecord(nestedError)) {
+    const nestedMessage = nestedError.message;
+    if (typeof nestedMessage === 'string' && nestedMessage.trim()) {
+      return nestedMessage.trim();
+    }
+  }
+  return null;
+}
+
+/** 校验 Rerank API 响应结构 */
+function isRerankResponse(payload: unknown): payload is RerankResponse {
+  if (!isRecord(payload) || !Array.isArray(payload.results)) return false;
+  return payload.results.every(
+    (item) => isRecord(item) && typeof item.index === 'number' && typeof item.relevance_score === 'number',
+  );
 }
 
 /** 重排序结果 */
@@ -122,6 +143,8 @@ export class RerankerClient {
 
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
+        const startTime = Date.now();
+
         const response = await fetch(this.config.baseUrl, {
           method: 'POST',
           headers: {
@@ -131,20 +154,71 @@ export class RerankerClient {
           body: JSON.stringify(requestBody),
         });
 
-        const data = (await response.json()) as RerankResponse & RerankErrorResponse;
+        const latencyMs = Date.now() - startTime;
+        const traceId = response.headers.get('x-siliconcloud-trace-id') || undefined;
 
-        // 检查 API 错误
-        if (!response.ok || data.error) {
-          const errorMsg = data.error?.message || `HTTP ${response.status}`;
-          throw new Error(`Rerank API 错误: ${errorMsg}`);
+        const rawBody = await response.text();
+        let parsedBody: unknown = null;
+        if (rawBody) {
+          try {
+            parsedBody = JSON.parse(rawBody) as unknown;
+          } catch {
+            if (response.ok) {
+              logger.error(
+                { status: response.status, latencyMs, traceId, response: rawBody },
+                'Rerank API 响应解析失败',
+              );
+              throw new Error(`Rerank API 错误: 响应非 JSON - ${rawBody}`);
+            }
+          }
+        }
+
+        if (!response.ok) {
+          const detail = extractErrorMessage(parsedBody) || rawBody || `HTTP ${response.status}`;
+          logger.error(
+            { status: response.status, latencyMs, traceId, response: detail },
+            'Rerank API 错误',
+          );
+          throw new Error(`Rerank API 错误: HTTP ${response.status} - ${detail}`);
+        }
+
+        if (!parsedBody) {
+          logger.error(
+            { status: response.status, latencyMs, traceId, response: rawBody },
+            'Rerank API 响应解析失败',
+          );
+          throw new Error(`Rerank API 错误: 响应非 JSON - ${rawBody}`);
+        }
+
+        const errMsg = extractErrorMessage(parsedBody);
+        if (errMsg) {
+          logger.error(
+            { status: response.status, latencyMs, traceId, response: errMsg },
+            'Rerank API 返回错误',
+          );
+          throw new Error(`Rerank API 错误: ${errMsg}`);
+        }
+
+        if (!isRerankResponse(parsedBody)) {
+          logger.error(
+            { status: response.status, latencyMs, traceId, response: rawBody },
+            'Rerank API 响应结构异常',
+          );
+          throw new Error(`Rerank API 错误: 响应结构异常 - ${rawBody}`);
         }
 
         // 转换结果
-        const results: RerankedDocument[] = data.results.map((item) => ({
-          originalIndex: item.index,
-          score: item.relevance_score,
-          text: documents[item.index],
-        }));
+        const results: RerankedDocument[] = parsedBody.results.map((item) => {
+          const text = documents[item.index];
+          if (typeof text !== 'string') {
+            throw new Error(`Rerank API 错误: 响应索引越界 index=${item.index}`);
+          }
+          return {
+            originalIndex: item.index,
+            score: item.relevance_score,
+            text,
+          };
+        });
 
         logger.debug(
           {
@@ -158,9 +232,17 @@ export class RerankerClient {
         return results;
       } catch (err) {
         const error = err as { message?: string; stack?: string };
-        const isRateLimited = error.message?.includes('429') || error.message?.includes('rate');
+        const message = error.message || '';
+        const lowerMessage = message.toLowerCase();
+        const isRateLimited = lowerMessage.includes('429') || lowerMessage.includes('rate');
+        // SiliconFlow 超长输入返回 "input must have less than" 或 413
+        const isInputTooLong = lowerMessage.includes('input must have less than') || lowerMessage.includes('413');
+        const isResponseInvalid =
+          message.includes('响应非 JSON') ||
+          message.includes('响应结构异常') ||
+          message.includes('响应索引越界');
 
-        if (attempt < retries) {
+        if (attempt < retries && !isInputTooLong && !isResponseInvalid) {
           const delay = isRateLimited ? 1000 * attempt : 500 * attempt;
           logger.warn(
             { attempt, maxRetries: retries, delay, error: error.message },

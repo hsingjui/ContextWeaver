@@ -62,6 +62,10 @@ EMBEDDINGS_BASE_URL=https://api.siliconflow.cn/v1/embeddings
 EMBEDDINGS_MODEL=BAAI/bge-m3
 EMBEDDINGS_MAX_CONCURRENCY=10
 EMBEDDINGS_DIMENSIONS=1024
+# 可选：模型上下文窗口（token），用于内部动态推导字符预算（默认 8192）
+# EMBEDDINGS_MAX_CONTEXT_TOKENS=8192
+# 可选：是否自动预拆分超长文本（默认 true；如需保留原文本语义可设为 false）
+# EMBEDDINGS_AUTO_SPLIT_LONG_TEXT=true
 
 # Reranker 配置（必需）
 RERANK_API_KEY=your-api-key-here
