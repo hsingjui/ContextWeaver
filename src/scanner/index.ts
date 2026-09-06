@@ -1,4 +1,3 @@
-import path from 'node:path';
 import { getEmbeddingConfig } from '../config.js';
 import {
   batchDelete,
@@ -111,13 +110,12 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
 
     // 扫描文件系统
     const filePaths = await crawl(rootPath);
-    // 使用 path.relative 确保跨平台兼容，并标准化为 / 分隔符
-    const scannedPaths = new Set(
-      filePaths.map((p) => path.relative(rootPath, p).replace(/\\/g, '/')),
-    );
 
     // 处理文件（使用全局并发队列，避免批次栅栏导致吞吐下降）
     const results = await processFiles(rootPath, filePaths, knownFiles);
+
+    // processFiles 已为每个文件计算过 relPath（/ 分隔符），直接复用，避免重复 path.relative
+    const scannedPaths = new Set(results.map((r) => r.relPath));
 
     // 准备数据库操作
     const toAdd: FileMeta[] = [];

@@ -1,24 +1,5 @@
-import fs from 'node:fs/promises';
 import chardet from 'chardet';
 import iconv from 'iconv-lite';
-
-/**
- * 支持的编码列表（按优先级排序）
- */
-const _SUPPORTED_ENCODINGS = [
-  'UTF-8',
-  'UTF-16 LE',
-  'UTF-16 BE',
-  'UTF-32 LE',
-  'UTF-32 BE',
-  'GB18030', // 兼容 GBK 和 GB2312
-  'Big5',
-  'Shift_JIS',
-  'EUC-JP',
-  'EUC-KR',
-  'ISO-8859-1',
-  'windows-1252',
-];
 
 /**
  * 规范化编码名称，使其与 iconv-lite 兼容
@@ -48,12 +29,6 @@ function normalizeEncoding(encoding: string): string {
  * 检测 BOM（Byte Order Mark）
  */
 function detectBOM(buffer: Buffer): string | null {
-  if (buffer.length >= 3) {
-    // UTF-8 BOM
-    if (buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
-      return 'UTF-8';
-    }
-  }
   if (buffer.length >= 4) {
     // UTF-32 LE
     if (buffer[0] === 0xff && buffer[1] === 0xfe && buffer[2] === 0x00 && buffer[3] === 0x00) {
@@ -62,6 +37,12 @@ function detectBOM(buffer: Buffer): string | null {
     // UTF-32 BE
     if (buffer[0] === 0x00 && buffer[1] === 0x00 && buffer[2] === 0xfe && buffer[3] === 0xff) {
       return 'UTF-32 BE';
+    }
+  }
+  if (buffer.length >= 3) {
+    // UTF-8 BOM
+    if (buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) {
+      return 'UTF-8';
     }
   }
   if (buffer.length >= 2) {
@@ -78,45 +59,32 @@ function detectBOM(buffer: Buffer): string | null {
 }
 
 /**
- * 读取文件并自动转换编码为 UTF-8
- * @param filePath 文件路径
- * @returns 解码后的文件内容和检测到的编码
+ * 解码缓冲区为 UTF-8 字符串（自动检测编码）
+ *
+ * 调用方须先用 buffer.includes(0) 做二进制检测——必须在解码前基于原始字节进行，
+ * 解码（尤其误判为 UTF-16 时）可能吃掉 NUL 字节导致漏判。
+ *
+ * @param buffer 原始文件字节
+ * @returns 解码后的 UTF-8 内容
  */
-export async function readFileWithEncoding(filePath: string): Promise<{
-  content: string;
-  encoding: string;
-  originalEncoding: string;
-}> {
-  const buffer = await fs.readFile(filePath);
-
-  // 检测编码
-  const bom = detectBOM(buffer);
-  let encoding = bom;
-
-  if (!encoding) {
-    const detected = chardet.detect(buffer);
-    encoding = detected || 'UTF-8';
-  }
-
+export function decodeBuffer(buffer: Buffer): string {
+  // 检测编码：BOM 优先，其次 chardet 启发式检测
+  const encoding = detectBOM(buffer) || chardet.detect(buffer) || 'UTF-8';
   const normalizedEncoding = normalizeEncoding(encoding);
 
-  // 尝试使用检测到的编码解码
+  // 解码（iconv 对无效字节采用替换策略，不会抛异常）
   let content: string;
-  try {
-    if (iconv.encodingExists(normalizedEncoding)) {
-      content = iconv.decode(buffer, normalizedEncoding);
-    } else {
-      // 回退到 UTF-8
-      content = buffer.toString('utf-8');
-    }
-  } catch {
-    // 解码失败，回退到 UTF-8
+  if (iconv.encodingExists(normalizedEncoding)) {
+    content = iconv.decode(buffer, normalizedEncoding);
+  } else {
     content = buffer.toString('utf-8');
   }
 
-  return {
-    content,
-    encoding: 'utf-8', // 输出始终是 UTF-8
-    originalEncoding: encoding,
-  };
+  // 剥离 BOM 字符：iconv-lite 对 UTF-8 不剥离 BOM（UTF-16/32 会自动剥），
+  // 统一去除开头的 U+FEFF，避免其进入 hash/AST/chunk
+  if (content.charCodeAt(0) === 0xfeff) {
+    content = content.slice(1);
+  }
+
+  return content;
 }

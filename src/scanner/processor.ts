@@ -8,14 +8,14 @@ import {
   type ProcessedChunk,
   SemanticSplitter,
 } from '../chunking/index.js';
-import { readFileWithEncoding } from '../utils/encoding.js';
+import { decodeBuffer } from '../utils/encoding.js';
 import { sha256 } from './hash.js';
 import { getLanguage } from './language.js';
 
 /**
  * 大文件阈值（字节）
  */
-const MAX_FILE_SIZE = 100 * 1024; // 500KB
+const MAX_FILE_SIZE = 100 * 1024; // 100KB
 
 /**
  * 需要兜底分片支持的目标语言集合
@@ -103,6 +103,22 @@ async function processFile(
 ): Promise<ProcessResult> {
   const language = getLanguage(relPath);
 
+  // lock 文件等 JSON 跳过判断只依赖路径，放在 stat/读文件之前，避免无效 I/O
+  if (language === 'json' && shouldSkipJson(relPath)) {
+    return {
+      absPath,
+      relPath,
+      hash: '',
+      content: null,
+      chunks: [],
+      language,
+      mtime: 0,
+      size: 0,
+      status: 'skipped',
+      error: 'Lock file or node_modules JSON',
+    };
+  }
+
   try {
     const stat = await fs.stat(absPath);
     const mtime = stat.mtimeMs;
@@ -139,11 +155,11 @@ async function processFile(
       };
     }
 
-    // 读取文件内容（自动检测编码并转换为 UTF-8）
-    const { content, originalEncoding } = await readFileWithEncoding(absPath);
+    // 读取原始字节，后续检测/hash/解码全部复用这一次 I/O
+    const buffer = await fs.readFile(absPath);
 
-    // 二进制检测：检查 NULL 字节
-    if (content.includes('\0')) {
+    // 二进制检测：基于原始字节、解码前进行（解码可能吃掉 NUL 字节导致漏判）
+    if (buffer.includes(0)) {
       return {
         absPath,
         relPath,
@@ -154,12 +170,15 @@ async function processFile(
         mtime,
         size,
         status: 'skipped',
-        error: `Binary file detected (original encoding: ${originalEncoding})`,
+        error: 'Binary file detected (NUL byte)',
       };
     }
 
-    // 计算哈希
-    const hash = sha256(content);
+    // 解码（自动检测编码并转换为 UTF-8，并剥离 BOM）
+    const content = decodeBuffer(buffer);
+
+    // 基于原始字节计算 hash，不受编码检测波动影响
+    const hash = sha256(buffer);
 
     // 如果已知 hash 且相同，则认为未修改（mtime 可能由于某些原因变了）
     if (known && known.hash === hash) {
@@ -167,7 +186,7 @@ async function processFile(
         absPath,
         relPath,
         hash,
-        content,
+        content: null, // 未变文件无需内容，上游只更新 mtime
         chunks: [],
         language,
         mtime,
@@ -227,7 +246,23 @@ async function processFile(
       status: known ? 'modified' : 'added',
     };
   } catch (err) {
-    const error = err as { message?: string };
+    const error = err as { code?: string; message?: string };
+    // 扫描窗口内文件被删除（git checkout、构建清理等）是正常竞态，
+    // 识别为 skipped 而非 error，避免错误统计虚增；DB 旧记录保留，下次扫描自然判定 deleted
+    if (error.code === 'ENOENT') {
+      return {
+        absPath,
+        relPath,
+        hash: '',
+        content: null,
+        chunks: [],
+        language,
+        mtime: 0,
+        size: 0,
+        status: 'skipped',
+        error: 'File deleted during scan',
+      };
+    }
     return {
       absPath,
       relPath,
