@@ -162,7 +162,12 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
           batchKnown.set(file, needsIndex ? { ...known, hash: '', mtime: -1 } : known);
         }
       }
-      const results = await processFiles(rootPath, batch, batchKnown);
+      const results = await processFiles(rootPath, batch, batchKnown, (done, total) => {
+        const progress = Math.floor(
+          ((i + (batch.length * done) / total) / filePaths.length) * 99,
+        );
+        options.onProgress?.(progress, 100, '正在扫描文件...');
+      });
       const toUpsert: FileMeta[] = [];
       const toUpdateMtime: Array<{ path: string; mtime: number; size: number }> = [];
       const skippedPaths: string[] = [];

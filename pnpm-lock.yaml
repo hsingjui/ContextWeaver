@@ -44,6 +44,9 @@ importers:
       ignore:
         specifier: ^7.0.8
         version: 7.0.8
+      onnxruntime-node:
+        specifier: 1.24.3
+        version: 1.24.3
       p-limit:
         specifier: ^7.3.2
         version: 7.3.2

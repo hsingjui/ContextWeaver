@@ -43,6 +43,7 @@
     "fdir": "^6.5.0",
     "iconv-lite": "^0.7.3",
     "ignore": "^7.0.8",
+    "onnxruntime-node": "1.24.3",
     "p-limit": "^7.3.2",
     "picocolors": "^1.1.1",
     "pino": "^10.3.1",

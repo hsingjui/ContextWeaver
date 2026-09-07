@@ -38,6 +38,8 @@ export class ProgressBar {
   private active = false;
   private startedAt = 0;
   private lastRenderAt = 0;
+  private lastMessage = '';
+  private renderTimer: ReturnType<typeof setInterval> | null = null;
   private lastPercent = 0;
   /** 非 TTY 模式下一次输出的百分比里程碑 */
   private nextMilestone = 0;
@@ -63,9 +65,17 @@ export class ProgressBar {
     this.lastPercent = 0;
     if (this.useAnsi) {
       setLineInterrupt(() => this.eraseCurrentLine());
+      this.renderTimer = setInterval(() => this.renderFrame(this.lastPercent, this.lastMessage), 1000);
     } else {
       this.nextMilestone = 0;
       this.lastPrintedPercent = -1;
+    }
+  }
+
+  private clearTimer(): void {
+    if (this.renderTimer !== null) {
+      clearInterval(this.renderTimer);
+      this.renderTimer = null;
     }
   }
 
@@ -73,6 +83,7 @@ export class ProgressBar {
     if (!this.active) return;
     const percent = total > 0 ? Math.min(100, Math.floor((current / total) * 100)) : 0;
     this.lastPercent = percent;
+    this.lastMessage = message ?? '';
 
     if (this.useAnsi) {
       const now = Date.now();
@@ -93,6 +104,7 @@ export class ProgressBar {
   done(message?: string): void {
     if (!this.active) return;
     setLineInterrupt(null);
+    this.clearTimer();
     if (this.useAnsi) {
       if (message === '') {
         this.eraseCurrentLine();
@@ -110,6 +122,7 @@ export class ProgressBar {
   fail(message?: string): void {
     if (!this.active) return;
     setLineInterrupt(null);
+    this.clearTimer();
     if (this.useAnsi) {
       this.eraseCurrentLine();
       this.write(`${color.red(symbol.err)} ${message ?? '失败'}\n`);
@@ -128,7 +141,8 @@ export class ProgressBar {
     const head = finished ? color.green(symbol.submit) : color.cyan(symbol.info);
     const parts: string[] = [`${head} ${bar} ${color.bold(`${`${percent}`.padStart(3)}%`)}`];
     if (message) parts.push(message);
-    const elapsed = Date.now() - this.startedAt;
+    // 对齐整秒：无论 update 多密集，时间显示每秒只跳一次
+    const elapsed = Math.floor((Date.now() - this.startedAt) / 1000) * 1000;
     parts.push(color.gray(formatDuration(elapsed)));
     this.write(`\r\x1b[2K${parts.join(' ')}`);
   }

@@ -289,14 +289,21 @@ export async function processFiles(
   rootPath: string,
   relPaths: string[],
   knownFiles: Map<string, KnownFileMeta>,
+  onProgress?: (done: number, total: number) => void,
 ): Promise<ProcessResult[]> {
   const maxFileSize = getMaxFileSize();
   const concurrency = getAdaptiveConcurrency();
   const limit = pLimit(concurrency);
 
+  let completed = 0;
   const tasks = relPaths.map((relPath) => {
     const known = knownFiles.get(relPath);
-    return limit(() => processFile(path.join(rootPath, relPath), relPath, known, maxFileSize));
+    return limit(async () => {
+      const result = await processFile(path.join(rootPath, relPath), relPath, known, maxFileSize);
+      completed++;
+      onProgress?.(completed, relPaths.length);
+      return result;
+    });
   });
 
   return Promise.all(tasks);

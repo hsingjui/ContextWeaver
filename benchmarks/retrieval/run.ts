@@ -3,20 +3,24 @@ import '../../src/config.js';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs, { promises as fsPromises } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ProgressBar, Spinner } from '../../src/cli/progress.js';
 import {
   checkEmbeddingEnv,
   checkRerankerEnv,
   getEmbeddingConfig,
   getRerankerConfig,
 } from '../../src/config.js';
-import { closeDb, generateProjectId, getAllFileMeta, initDb } from '../../src/db/index.js';
+import { closeDb, getAllFileMeta, initDb } from '../../src/db/index.js';
 import { closeIndexer } from '../../src/indexer/index.js';
 import { scan } from '../../src/scanner/index.js';
 import { DEFAULT_CONFIG } from '../../src/search/config.js';
 import { SearchService } from '../../src/search/SearchService.js';
+import { setConsoleVerbose } from '../../src/utils/logger.js';
 import { closeVectorStore } from '../../src/vectorStore/index.js';
+import { getBenchmarkIndexIdentity } from './indexIdentity.js';
 import {
   type BenchmarkSummary,
   evaluateRanking,
@@ -71,27 +75,71 @@ interface BenchmarkCaseResult {
 }
 
 interface BenchmarkOutput {
-  schemaVersion: 2;
+  schemaVersion: 3;
   generatedAt: string;
   repoName: string;
   git: {
     commit: string | null;
     dirty: boolean | null;
+    dirtyFiles: string[] | null;
   };
   models: {
-    embeddingProvider: string;
-    embeddingModel: string;
-    rerankerModel: string;
+    embedding: {
+      provider: string;
+      model: string;
+      dimensions: number;
+      maxConcurrency: number;
+      maxInputChars: number;
+      maxBatchChars: number;
+      autoSplitLongText: boolean;
+      endpoint?: string;
+      repo?: string;
+      revision?: string;
+      dtype?: string;
+      maxContextTokens?: number;
+      pooling?: string;
+      documentInputSpaceVersion?: string;
+    };
+    reranker: {
+      model: string;
+      topN: number;
+      endpoint: string;
+    };
   };
   fingerprints: {
     corpus: string;
     cases: string;
     searchConfig: string;
     corpusRules: string;
+    modelConfig: string;
+    index: string;
   };
   corpus: {
     projectId: string;
+    indexKey: string;
+    indexFingerprint: string;
+    fileCount: number;
     excludedPatterns: string[];
+  };
+  searchConfig: typeof DEFAULT_CONFIG;
+  runtime: {
+    platform: NodeJS.Platform;
+    arch: string;
+    nodeVersion: string;
+    osRelease: string;
+    cpuModel: string;
+    cpuCount: number;
+    totalMemoryBytes: number;
+  };
+  run: {
+    startedAt: string;
+    finishedAt: string;
+    totalDurationMs: number;
+    index: {
+      mode: 'refreshed' | 'reused';
+      durationMs: number;
+    };
+    queriesDurationMs: number;
   };
   casesFile: string;
   summary: BenchmarkSummary;
@@ -115,18 +163,17 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function benchmarkProjectId(repoPath: string): string {
-  return `${generateProjectId(repoPath)}-retrieval-benchmark`;
-}
-
-function corpusFingerprint(projectId: string): string {
+function corpusSnapshot(projectId: string): { fingerprint: string; fileCount: number } {
   const db = initDb(projectId);
   try {
     const rows = Array.from(
       getAllFileMeta(db),
       ([filePath, meta]) => `${filePath}\0${meta.hash}`,
     ).sort();
-    return sha256(rows.join('\n'));
+    return {
+      fingerprint: sha256(rows.join('\n')),
+      fileCount: rows.length,
+    };
   } finally {
     closeDb(db);
   }
@@ -209,16 +256,48 @@ function gitMetadata(repoPath: string): BenchmarkOutput['git'] {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
-    const dirty =
-      execFileSync('git', ['status', '--porcelain'], {
-        cwd: repoPath,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim().length > 0;
-    return { commit, dirty };
+    const status = execFileSync('git', ['status', '--porcelain'], {
+      cwd: repoPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trimEnd();
+    const dirtyFiles = status
+      ? status
+          .split('\n')
+          .map((line) => line.slice(3).trim())
+          .filter(Boolean)
+          .sort()
+      : [];
+    return { commit, dirty: dirtyFiles.length > 0, dirtyFiles };
   } catch {
-    return { commit: null, dirty: null };
+    return { commit: null, dirty: null, dirtyFiles: null };
   }
+}
+
+function sanitizedEndpoint(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return '<configured>';
+  }
+}
+
+function runtimeMetadata(): BenchmarkOutput['runtime'] {
+  const cpus = os.cpus();
+  return {
+    platform: process.platform,
+    arch: process.arch,
+    nodeVersion: process.version,
+    osRelease: os.release(),
+    cpuModel: cpus[0]?.model ?? 'unknown',
+    cpuCount: cpus.length,
+    totalMemoryBytes: os.totalmem(),
+  };
 }
 
 function pct(value: number): string {
@@ -258,17 +337,55 @@ function printCategorySummary(
 }
 
 async function ensureIndex(repoPath: string, projectId: string): Promise<void> {
-  const stats = await scan(repoPath, {
-    projectId,
-    extraExcludePatterns: BENCHMARK_EXCLUDE_PATTERNS,
-  });
-  const errors = stats.errors + (stats.vectorIndex?.errors ?? 0);
-  if (errors > 0) {
-    throw new Error(`Index refresh completed with ${errors} error(s)`);
+  const spinner = new Spinner();
+  const bar = new ProgressBar();
+  let barStarted = false;
+
+  setConsoleVerbose(false);
+  spinner.start('正在扫描并建立 Benchmark 索引');
+
+  try {
+    const stats = await scan(repoPath, {
+      projectId,
+      extraExcludePatterns: BENCHMARK_EXCLUDE_PATTERNS,
+      onProgress: (current, total, message) => {
+        if (!barStarted) {
+          // 空仓库首个回调可能直接是 100%，避免闪现进度条。
+          if (total !== undefined && current >= total) return;
+          spinner.stop();
+          bar.start();
+          barStarted = true;
+        }
+        bar.update(current, total ?? 100, message);
+      },
+    });
+
+    if (barStarted) {
+      spinner.stop();
+      bar.done('');
+    } else {
+      // 全程无 <100% 回调（空仓库）：spinner 保持到结束，兜底输出完成行
+      spinner.stop('扫描完成');
+    }
+    const errors = stats.errors + (stats.vectorIndex?.errors ?? 0);
+    if (errors > 0) {
+      throw new Error(`Index refresh completed with ${errors} error(s)`);
+    }
+  } catch (error) {
+    if (barStarted) {
+      bar.fail('Benchmark 索引失败');
+    } else {
+      spinner.fail('Benchmark 索引失败');
+    }
+    throw error;
+  } finally {
+    setConsoleVerbose(true);
   }
 }
 
 async function main(): Promise<void> {
+  const runStartedAt = new Date();
+  const runStarted = performance.now();
   const options = parseOptions(process.argv.slice(2));
   const cases = await loadCases(options.casesPath, options.repoPath);
   const missingVars = [...checkEmbeddingEnv().missingVars, ...checkRerankerEnv().missingVars];
@@ -277,24 +394,65 @@ async function main(): Promise<void> {
   }
   const embedding = getEmbeddingConfig();
   const reranker = getRerankerConfig();
-  const projectId = benchmarkProjectId(options.repoPath);
+  const indexIdentity = getBenchmarkIndexIdentity(options.repoPath, embedding);
+  const projectId = indexIdentity.projectId;
+  const modelConfig: BenchmarkOutput['models'] = {
+    embedding: {
+      provider: embedding.provider,
+      model: embedding.model,
+      dimensions: embedding.dimensions,
+      maxConcurrency: embedding.maxConcurrency,
+      maxInputChars: embedding.maxInputChars,
+      maxBatchChars: embedding.maxBatchChars,
+      autoSplitLongText: embedding.autoSplitLongText,
+      ...(embedding.provider === 'local'
+        ? {
+            repo: embedding.repo,
+            revision: embedding.revision,
+            dtype: embedding.dtype,
+            maxContextTokens: embedding.maxContextTokens,
+            pooling: embedding.pooling,
+            documentInputSpaceVersion: embedding.documentInputSpaceVersion,
+          }
+        : { endpoint: sanitizedEndpoint(embedding.baseUrl) }),
+    },
+    reranker: {
+      model: reranker.model,
+      topN: reranker.topN,
+      endpoint: sanitizedEndpoint(reranker.baseUrl),
+    },
+  };
 
+  console.log(`Benchmark index: ${indexIdentity.key}`);
+  const indexStarted = performance.now();
   if (!options.noIndex) {
     console.log('Refreshing isolated benchmark index (tests excluded)...');
     await ensureIndex(options.repoPath, projectId);
+  } else {
+    console.log('Reusing frozen benchmark index (--no-index)...');
+  }
+  const indexDurationMs = performance.now() - indexStarted;
+  const corpus = corpusSnapshot(projectId);
+  if (options.noIndex && corpus.fileCount === 0) {
+    throw new Error(
+      `No frozen benchmark index exists for ${indexIdentity.key}. Re-run without --no-index first.`,
+    );
   }
 
   const fingerprints: BenchmarkOutput['fingerprints'] = {
-    corpus: corpusFingerprint(projectId),
+    corpus: corpus.fingerprint,
     cases: sha256(await fsPromises.readFile(options.casesPath, 'utf8')),
     searchConfig: sha256(JSON.stringify(DEFAULT_CONFIG)),
     corpusRules: sha256(JSON.stringify(BENCHMARK_EXCLUDE_PATTERNS)),
+    modelConfig: sha256(JSON.stringify(modelConfig)),
+    index: indexIdentity.fingerprint,
   };
 
   const service = new SearchService(projectId, options.repoPath);
   await service.init();
 
   const results: BenchmarkCaseResult[] = [];
+  const queriesStarted = performance.now();
   try {
     for (let index = 0; index < cases.length; index++) {
       const benchmarkCase = cases[index];
@@ -360,6 +518,7 @@ async function main(): Promise<void> {
     closeIndexer(projectId);
     await closeVectorStore(projectId);
   }
+  const queriesDurationMs = performance.now() - queriesStarted;
 
   const summary = summarize(results);
   const byCategory: Partial<Record<RetrievalCategory, BenchmarkSummary>> = {};
@@ -369,20 +528,32 @@ async function main(): Promise<void> {
     byCategory[category] = summarize(results.filter((result) => result.category === category));
   }
 
+  const finishedAt = new Date();
   const output: BenchmarkOutput = {
-    schemaVersion: 2,
-    generatedAt: new Date().toISOString(),
+    schemaVersion: 3,
+    generatedAt: finishedAt.toISOString(),
     repoName: path.basename(options.repoPath),
     git: gitMetadata(options.repoPath),
-    models: {
-      embeddingProvider: embedding.provider,
-      embeddingModel: embedding.model,
-      rerankerModel: reranker.model,
-    },
+    models: modelConfig,
     fingerprints,
     corpus: {
       projectId,
+      indexKey: indexIdentity.key,
+      indexFingerprint: indexIdentity.fingerprint,
+      fileCount: corpus.fileCount,
       excludedPatterns: BENCHMARK_EXCLUDE_PATTERNS,
+    },
+    searchConfig: DEFAULT_CONFIG,
+    runtime: runtimeMetadata(),
+    run: {
+      startedAt: runStartedAt.toISOString(),
+      finishedAt: finishedAt.toISOString(),
+      totalDurationMs: performance.now() - runStarted,
+      index: {
+        mode: options.noIndex ? 'reused' : 'refreshed',
+        durationMs: indexDurationMs,
+      },
+      queriesDurationMs,
     },
     casesFile: path.relative(options.repoPath, options.casesPath).replace(/\\/g, '/'),
     summary,

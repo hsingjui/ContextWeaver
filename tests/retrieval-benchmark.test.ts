@@ -2,8 +2,29 @@ import assert from 'node:assert/strict';
 import fs, { promises as fsPromises } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import { getBenchmarkIndexIdentity } from '../benchmarks/retrieval/indexIdentity.js';
 import { evaluateRanking, type RetrievalCase, summarize } from '../benchmarks/retrieval/metrics.js';
-import { getExcludePatterns } from '../src/config.js';
+import { getExcludePatterns, type LocalEmbeddingConfig } from '../src/config.js';
+
+function localEmbeddingConfig(overrides: Partial<LocalEmbeddingConfig> = {}): LocalEmbeddingConfig {
+  return {
+    provider: 'local',
+    model: 'jina-embeddings-v2-base-code',
+    repo: 'jinaai/jina-embeddings-v2-base-code',
+    revision: '516f4baf13dec4ddddda8631e019b5737c8bc250',
+    dtype: 'q8',
+    dimensions: 768,
+    maxContextTokens: 8192,
+    cacheDir: '/tmp/contextweaver-benchmark-model',
+    pooling: 'mean',
+    documentInputSpaceVersion: 'jina-mean-v1',
+    maxConcurrency: 10,
+    maxInputChars: 8028,
+    maxBatchChars: 24084,
+    autoSplitLongText: false,
+    ...overrides,
+  };
+}
 
 test('retrieval benchmark v1 contains 40 curated cases with the intended category mix', async () => {
   const casesPath = path.resolve('benchmarks/retrieval/cases.json');
@@ -40,6 +61,34 @@ test('retrieval benchmark v1 contains 40 curated cases with the intended categor
 
 test('benchmark files are excluded from the indexed corpus to prevent answer leakage', () => {
   assert.ok(getExcludePatterns().includes('benchmarks'));
+});
+
+test('benchmark keeps separate index identities for embedding models only', () => {
+  const repoPath = path.resolve('.');
+  const jina = localEmbeddingConfig();
+  const jinaRuntimeTuning = localEmbeddingConfig({
+    maxConcurrency: 2,
+    maxBatchChars: 12_000,
+  });
+  const qwen = localEmbeddingConfig({
+    model: 'qwen3-embedding-0.6b',
+    repo: 'onnx-community/Qwen3-Embedding-0.6B-ONNX',
+    revision: 'c25a394dd583836952667c12f008335071b3f43d',
+    dimensions: 1024,
+    maxContextTokens: 32768,
+    pooling: 'last_token',
+    documentInputSpaceVersion: 'qwen3-last-token-v1',
+  });
+
+  const jinaIdentity = getBenchmarkIndexIdentity(repoPath, jina);
+  const tunedIdentity = getBenchmarkIndexIdentity(repoPath, jinaRuntimeTuning);
+  const qwenIdentity = getBenchmarkIndexIdentity(repoPath, qwen);
+
+  assert.deepEqual(jinaIdentity, tunedIdentity);
+  assert.notEqual(jinaIdentity.projectId, qwenIdentity.projectId);
+  assert.notEqual(jinaIdentity.fingerprint, qwenIdentity.fingerprint);
+  assert.match(jinaIdentity.key, /^local-jina-embeddings-v2-base-code-/);
+  assert.match(qwenIdentity.key, /^local-qwen3-embedding-0.6b-/);
 });
 
 test('evaluateRanking computes file-level hit, MRR, coverage, and unique files', () => {

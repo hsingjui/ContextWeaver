@@ -27,16 +27,50 @@ interface BenchmarkOutput {
   };
   summary: Summary;
   byCategory: Record<string, Summary>;
-  models?: {
-    embeddingProvider: string;
-    embeddingModel: string;
-    rerankerModel: string;
-  };
+  models?:
+    | {
+        embeddingProvider: string;
+        embeddingModel: string;
+        rerankerModel: string;
+      }
+    | {
+        embedding: {
+          provider: string;
+          model: string;
+        };
+        reranker: {
+          model: string;
+        };
+      };
   fingerprints?: {
     corpus: string;
     cases: string;
     searchConfig: string;
     corpusRules: string;
+    modelConfig?: string;
+    index?: string;
+  };
+  corpus?: {
+    projectId?: string;
+    indexKey?: string;
+    indexFingerprint?: string;
+    fileCount?: number;
+  };
+  runtime?: {
+    platform: string;
+    arch: string;
+    nodeVersion: string;
+    osRelease: string;
+    cpuModel: string;
+    cpuCount: number;
+  };
+  run?: {
+    totalDurationMs: number;
+    index: {
+      mode: string;
+      durationMs: number;
+    };
+    queriesDurationMs: number;
   };
 }
 
@@ -96,9 +130,16 @@ async function readOutput(filePath: string): Promise<BenchmarkOutput> {
 }
 
 function modelOf(output: BenchmarkOutput): string | null {
-  return output.models
-    ? `${output.models.embeddingProvider}/${output.models.embeddingModel} + ${output.models.rerankerModel}`
-    : null;
+  if (!output.models) return null;
+  if ('embedding' in output.models) {
+    return `${output.models.embedding.provider}/${output.models.embedding.model} + ${output.models.reranker.model}`;
+  }
+  return `${output.models.embeddingProvider}/${output.models.embeddingModel} + ${output.models.rerankerModel}`;
+}
+
+function runtimeOf(output: BenchmarkOutput): string | null {
+  if (!output.runtime) return null;
+  return `${output.runtime.platform}/${output.runtime.arch} ${output.runtime.cpuModel} Node ${output.runtime.nodeVersion}`;
 }
 
 function assertComparable(
@@ -111,14 +152,17 @@ function assertComparable(
   },
 ): void {
   const failures: string[] = [];
-  if ((baseline.schemaVersion ?? 0) < 2 || (candidate.schemaVersion ?? 0) < 2) {
+  if ((baseline.schemaVersion ?? 0) < 3 || (candidate.schemaVersion ?? 0) < 3) {
     failures.push(
-      'both results must use benchmark schemaVersion >= 2 (legacy results lack strict fingerprints)',
+      'both results must use benchmark schemaVersion >= 3 (legacy results lack complete reproducibility metadata)',
     );
   }
   if (!baseline.fingerprints || !candidate.fingerprints) {
     failures.push('missing corpus/cases/search-config fingerprints');
   } else {
+    if (!baseline.fingerprints.modelConfig || !candidate.fingerprints.modelConfig) {
+      failures.push('model config fingerprint is missing');
+    }
     if (baseline.fingerprints.cases !== candidate.fingerprints.cases) {
       failures.push('cases hash differs');
     }
@@ -136,6 +180,20 @@ function assertComparable(
       baseline.fingerprints.searchConfig !== candidate.fingerprints.searchConfig
     ) {
       failures.push('search config hash differs');
+    }
+    if (
+      !options.allowModelChange &&
+      baseline.fingerprints.modelConfig !== candidate.fingerprints.modelConfig
+    ) {
+      failures.push('embedding/reranker configuration differs');
+    }
+    if (
+      baseline.fingerprints.index &&
+      candidate.fingerprints.index &&
+      !options.allowModelChange &&
+      baseline.fingerprints.index !== candidate.fingerprints.index
+    ) {
+      failures.push('benchmark index identity differs');
     }
   }
 
@@ -161,7 +219,7 @@ function assertComparable(
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const baselinePath = path.resolve(
-    readArg(args, '--baseline', 'benchmarks/retrieval/results/baseline.json'),
+    readArg(args, '--baseline', 'benchmarks/retrieval/results/local-jina-v2-base-code.json'),
   );
   const candidatePath = path.resolve(
     readArg(args, '--candidate', 'benchmarks/retrieval/results/latest.json'),
@@ -181,12 +239,35 @@ async function main(): Promise<void> {
   console.log(`Candidate: ${candidatePath}\n`);
   console.log(`Embedding/reranker  baseline:   ${modelOf(baseline)}`);
   console.log(`                   candidate:  ${modelOf(candidate)}`);
+  if (baseline.corpus?.indexKey || candidate.corpus?.indexKey) {
+    console.log(`Benchmark index    baseline:   ${baseline.corpus?.indexKey ?? '(legacy result)'}`);
+    console.log(
+      `                   candidate:  ${candidate.corpus?.indexKey ?? '(legacy result)'}`,
+    );
+  }
   console.log(
     `Git state          baseline:   ${baseline.git?.commit ?? '(unknown)'} dirty=${String(baseline.git?.dirty)}`,
   );
   console.log(
     `                   candidate:  ${candidate.git?.commit ?? '(unknown)'} dirty=${String(candidate.git?.dirty)}\n`,
   );
+  console.log(`Runtime            baseline:   ${runtimeOf(baseline) ?? '(unknown)'}`);
+  console.log(`                   candidate:  ${runtimeOf(candidate) ?? '(unknown)'}`);
+  if (runtimeOf(baseline) !== runtimeOf(candidate)) {
+    console.log(
+      '                   note: runtime differs; latency deltas are not apples-to-apples',
+    );
+  }
+  if (baseline.run && candidate.run) {
+    console.log(
+      `Run mode           baseline:   index=${baseline.run.index.mode} total=${Math.round(baseline.run.totalDurationMs)}ms`,
+    );
+    console.log(
+      `                   candidate:  index=${candidate.run.index.mode} total=${Math.round(candidate.run.totalDurationMs)}ms\n`,
+    );
+  } else {
+    console.log('');
+  }
   printSummaryDelta(baseline.summary, candidate.summary);
 
   console.log('\nBy category (Top1 / coverage delta)');
