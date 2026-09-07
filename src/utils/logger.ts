@@ -4,10 +4,24 @@ import path from 'node:path';
 import { Writable } from 'node:stream';
 import pino from 'pino';
 import { isDev, isMcpMode } from '../config.js';
+import { interruptLineRendering } from './terminal.js';
 
 const logLevel = isDev ? 'debug' : 'info';
 const logDir = path.join(os.homedir(), '.contextweaver', 'logs');
 const LOG_RETENTION_DAYS = 7;
+
+/**
+ * 控制台详细模式开关（文件日志不受影响）。
+ *
+ * CLI 命令在进度条 / 汇总面板展示期间设为 false，让 info 级日志只写文件，
+ * 控制台保留 warn/error，避免与进度条输出交叉干扰。
+ */
+let consoleVerbose = true;
+
+/** 设置控制台是否输出 info/debug 级日志（warn/error 始终输出） */
+export function setConsoleVerbose(enabled: boolean): void {
+  consoleVerbose = enabled;
+}
 
 function ensureLogDir(dir: string): void {
   if (!fs.existsSync(dir)) {
@@ -162,7 +176,7 @@ function createConsoleStream(): Writable {
   };
   const reset = '\x1b[0m';
 
-  return new Writable({
+  const stream = new Writable({
     write(
       chunk: Buffer | string,
       _encoding: BufferEncoding,
@@ -170,6 +184,11 @@ function createConsoleStream(): Writable {
     ) {
       try {
         const log = JSON.parse(chunk.toString());
+        // 非详细模式：控制台仅保留 warn 及以上（info/debug 仍写入日志文件）
+        if (!consoleVerbose && (log.level ?? 30) < 40) {
+          callback();
+          return;
+        }
         const time = formatTime();
         const level = getLevelLabel(log.level);
         const color = colors[log.level] || '';
@@ -184,12 +203,23 @@ function createConsoleStream(): Writable {
           line += ` ${color}${extraStr}${reset}`;
         }
 
+        // 进度条 / Spinner 行内渲染期间先清除当前行，避免日志拼接在进度条后
+        interruptLineRendering();
         process.stdout.write(`${line}\n`, callback);
       } catch {
+        interruptLineRendering();
         process.stdout.write(chunk.toString(), callback);
       }
     },
   });
+  // 下游管道提前关闭（如 ... | head）时静默丢弃控制台输出，避免未处理 'error' 崩溃；
+  // 其余控制台写入错误降级到 stderr（文件日志流不受影响）。
+  stream.on('error', (err) => {
+    if ((err as NodeJS.ErrnoException).code !== 'EPIPE') {
+      console.error(`[Logger] 控制台输出失败: ${(err as Error).message}`);
+    }
+  });
+  return stream;
 }
 
 // =========================================

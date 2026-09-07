@@ -3,20 +3,51 @@
 import './config.js';
 
 import { promises as fs } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import cac from 'cac';
+import {
+  color,
+  intro,
+  log,
+  ProgressBar,
+  PromptCancelError,
+  runDoctorCommand,
+  runInitCommand,
+  runModelCommand,
+  Spinner,
+  symbol,
+  writeLine,
+} from './cli/index.js';
 import { generateProjectId } from './db/index.js';
 import { type ScanStats, scan } from './scanner/index.js';
-import { logger } from './utils/logger.js';
+import { logger, setConsoleVerbose } from './utils/logger.js';
 
 // 读取 package.json 获取版本号
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pkgPath = path.resolve(__dirname, '../package.json');
 const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf-8'));
 
+// 下游管道提前关闭（如 ... | head）时静默退出，避免 EPIPE 崩溃栈
+process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EPIPE') process.exit(0);
+  throw err;
+});
+
 const cli = cac('contextweaver');
+
+async function runModelAction(
+  action: 'install' | 'list' | 'use' | 'remove',
+  model?: string,
+): Promise<void> {
+  try {
+    await runModelCommand(action, model);
+  } catch (err) {
+    const error = err as { message?: string; stack?: string };
+    logger.error({ err, stack: error.stack }, `模型${action}失败: ${error.message}`);
+    process.exit(1);
+  }
+}
 
 // 自定义版本输出，只显示版本号
 if (process.argv.includes('-v') || process.argv.includes('--version')) {
@@ -24,73 +55,53 @@ if (process.argv.includes('-v') || process.argv.includes('--version')) {
   process.exit(0);
 }
 
-cli.command('init', '初始化 ContextWeaver 配置').action(async () => {
-  const configDir = path.join(os.homedir(), '.contextweaver');
-  const envFile = path.join(configDir, '.env');
+/** TTY 与管道共用的索引汇总，计数单位均为文件。 */
+function printIndexSummary(stats: ScanStats, duration: string, errors: number): void {
+  const result =
+    stats.vectorIndex && stats.vectorIndex.indexed > 0
+      ? `已更新 ${stats.vectorIndex.indexed} 个文件的索引`
+      : '索引完成';
+  const heading = `${result} ${color.gray(`${symbol.dot} ${duration}s`)}`;
+  if (errors > 0) {
+    log.warn(`索引部分失败 ${color.gray(`${symbol.dot} ${duration}s`)}`);
+  } else {
+    log.success(heading);
+  }
+  log.message(`共扫描 ${stats.totalFiles} 个文件`);
+  const changes: Array<[string, number]> = [
+    ['新增', stats.added],
+    ['更新', stats.modified],
+    ['删除', stats.deleted],
+    ['跳过', stats.skipped],
+  ];
+  const details = changes
+    .filter(([, count]) => count > 0)
+    .map(([label, count]) => `${label} ${count} 个文件`);
+  if (details.length > 0) log.message(color.gray(details.join('，')));
+  if (errors > 0) {
+    if (stats.vectorIndex) {
+      log.message(`已成功更新 ${stats.vectorIndex.indexed} 个文件的索引`);
+    }
+    log.error(`${errors} 项处理失败，可重新运行命令重试，详见日志`);
+  }
+}
 
-  logger.info('开始初始化 ContextWeaver...');
-
-  // 创建配置目录
-  try {
-    await fs.mkdir(configDir, { recursive: true });
-    logger.info(`创建配置目录: ${configDir}`);
-  } catch (err) {
-    const error = err as { code?: string; message?: string; stack?: string };
-    if (error.code !== 'EEXIST') {
-      logger.error({ err, stack: error.stack }, `创建配置目录失败: ${error.message}`);
+cli
+  .command('init', '初始化 ContextWeaver 配置（交互式向导）')
+  .option('-y, --defaults', '跳过向导，直接写入默认模板配置')
+  .action(async (options: { defaults?: boolean }) => {
+    try {
+      await runInitCommand({ defaults: options.defaults === true });
+    } catch (err) {
+      if (err instanceof PromptCancelError) {
+        // 取消画面已由提示层渲染
+        return;
+      }
+      const error = err as { message?: string; stack?: string };
+      logger.error({ err, stack: error.stack }, `初始化失败: ${error.message}`);
       process.exit(1);
     }
-    logger.info(`配置目录已存在: ${configDir}`);
-  }
-
-  // 检查是否已存在 .env 文件
-  try {
-    await fs.access(envFile);
-    logger.warn(`.env 文件已存在: ${envFile}`);
-    logger.info('初始化完成！');
-    return;
-  } catch {
-    // 文件不存在，继续创建
-  }
-
-  // 写入默认 .env 配置
-  const defaultEnvContent = `# ContextWeaver 示例环境变量配置文件
-
-# Embedding API 配置（必需）
-EMBEDDINGS_API_KEY=your-api-key-here
-EMBEDDINGS_BASE_URL=https://api.siliconflow.cn/v1/embeddings
-EMBEDDINGS_MODEL=BAAI/bge-m3
-EMBEDDINGS_MAX_CONCURRENCY=10
-EMBEDDINGS_DIMENSIONS=1024
-# 可选：模型上下文窗口（token），用于内部动态推导字符预算（默认 8192）
-# EMBEDDINGS_MAX_CONTEXT_TOKENS=8192
-# 可选：是否自动预拆分超长文本（默认 true；如需保留原文本语义可设为 false）
-# EMBEDDINGS_AUTO_SPLIT_LONG_TEXT=true
-
-# Reranker 配置（必需）
-RERANK_API_KEY=your-api-key-here
-RERANK_BASE_URL=https://api.siliconflow.cn/v1/rerank
-RERANK_MODEL=BAAI/bge-reranker-v2-m3
-RERANK_TOP_N=20
-
-# 索引忽略模式（可选，逗号分隔，gitignore 语法，默认已包含常见忽略项）
-# 优先级最高，可用 ! 取反默认项，例：IGNORE_PATTERNS=!dist,.next,*.generated.ts
-# IGNORE_PATTERNS=.venv,node_modules
-`;
-  try {
-    await fs.writeFile(envFile, defaultEnvContent);
-    logger.info(`创建 .env 文件: ${envFile}`);
-  } catch (err) {
-    const error = err as { message?: string; stack?: string };
-    logger.error({ err, stack: error.stack }, `创建 .env 文件失败: ${error.message}`);
-    process.exit(1);
-  }
-
-  logger.info('下一步操作:');
-  logger.info(`   1. 编辑配置文件: ${envFile}`);
-  logger.info('   2. 填写你的 API Key 和其他配置');
-  logger.info('初始化完成！');
-});
+  });
 
 cli
   .command('index [path]', '扫描代码库并建立索引')
@@ -98,20 +109,23 @@ cli
   .action(async (targetPath: string | undefined, options: { force?: boolean }) => {
     const rootPath = targetPath ? path.resolve(targetPath) : process.cwd();
     const projectId = generateProjectId(rootPath);
-
-    logger.info(`开始扫描: ${rootPath}`);
-    logger.info(`项目 ID: ${projectId}`);
-    if (options.force) {
-      logger.info('强制重新索引: 是');
-    }
-
     const startTime = Date.now();
+    intro('索引');
+    writeLine(rootPath);
+    if (options.force) log.info('强制重建');
+    writeLine('');
+
+    const spinner = new Spinner();
+    const bar = new ProgressBar();
+    let barStarted = false;
 
     try {
       const { withLock } = await import('./utils/lock.js');
 
-      // 进度日志节流：只在 30%、60%、90% 时输出（100% 由扫描完成日志代替）
-      let lastLoggedPercent = 0;
+      // 索引期间控制台只保留 warn/error（info 走进度条与汇总面板，文件日志不受影响）
+      setConsoleVerbose(false);
+      spinner.start('正在扫描代码库');
+
       const stats: ScanStats = await withLock(
         projectId,
         'index',
@@ -119,32 +133,65 @@ cli
           scan(rootPath, {
             force: options.force,
             onProgress: (current, total, message) => {
-              if (total !== undefined) {
-                const percent = Math.floor((current / total) * 100);
-                if (percent >= lastLoggedPercent + 30 && percent < 100) {
-                  logger.info(`索引进度: ${percent}% - ${message || ''}`);
-                  lastLoggedPercent = Math.floor(percent / 30) * 30;
-                }
+              if (!barStarted) {
+                // 空仓库时首个回调即为 100%，不闪现进度条
+                if (total !== undefined && current >= total) return;
+                spinner.stop();
+                bar.start();
+                barStarted = true;
               }
+              // scan 的 ProgressCallback 中 total 可能为 undefined（CLI 路径恒为 100）
+              bar.update(current, total ?? 100, message);
             },
           }),
         10 * 60 * 1000,
       );
 
-      process.stdout.write('\n');
+      spinner.stop();
+      if (barStarted) bar.done('');
+      setConsoleVerbose(true);
 
-      const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
       const errors = stats.errors + (stats.vectorIndex?.errors ?? 0);
-      logger.info(`${errors ? '索引部分失败，可重试' : '索引完成'} (${duration}s)`);
-      logger.info(
-        `总数:${stats.totalFiles} 新增:${stats.added} 修改:${stats.modified} 未变:${stats.unchanged} 删除:${stats.deleted} 跳过:${stats.skipped} 错误:${errors}`,
-      );
+      printIndexSummary(stats, duration, errors);
       if (errors > 0) process.exitCode = 1;
     } catch (err) {
+      spinner.stop();
+      if (barStarted) bar.fail('索引失败');
+      setConsoleVerbose(true);
       const error = err as { message?: string; stack?: string };
       logger.error({ err, stack: error.stack }, `索引失败: ${error.message}`);
       process.exit(1);
     }
+  });
+
+cli
+  .command('model install [model]', '安装内置本地 Embedding 模型')
+  .action(async (model: string | undefined) => {
+    await runModelAction('install', model);
+  });
+
+cli.command('model list', '列出内置本地 Embedding 模型及安装状态').action(async () => {
+  await runModelAction('list');
+});
+
+cli
+  .command('model use [model]', '启用已安装的本地 Embedding 模型')
+  .action(async (model: string | undefined) => {
+    await runModelAction('use', model);
+  });
+
+cli
+  .command('model remove [model]', '删除内置本地 Embedding 模型缓存')
+  .action(async (model: string | undefined) => {
+    await runModelAction('remove', model);
+  });
+
+cli
+  .command('doctor', '体检配置：环境变量、目录权限、Embedding / Reranker 连通性与模型状态')
+  .option('--offline', '跳过网络连通性测试')
+  .action(async (options: { offline?: boolean }) => {
+    await runDoctorCommand({ offline: options.offline === true });
   });
 
 cli.command('mcp', '启动 MCP 服务器').action(async () => {
@@ -198,5 +245,36 @@ cli
     },
   );
 
-cli.help();
+cli.help((sections) => {
+  const titles: Record<string, string> = {
+    Usage: '用法',
+    Commands: '命令',
+    Options: '选项',
+    Examples: '示例',
+  };
+  return sections.map((section) => {
+    if (!section.title) {
+      return { body: color.bold('ContextWeaver') };
+    }
+    if (section.title === 'Commands') {
+      return {
+        title: color.bold('命令'),
+        body: cli.commands
+          .map((command) => `  ${color.cyan(command.rawName)}\n    ${color.gray(command.description)}`)
+          .join('\n'),
+      };
+    }
+    if (section.title.startsWith('For more info')) {
+      return { body: color.gray('  contextweaver <command> --help 查看命令选项') };
+    }
+    return {
+      title: color.bold(titles[section.title] ?? section.title),
+      body: section.body,
+    };
+  });
+});
+const helpOption = cli.globalCommand.options.find((option) => option.name === 'help');
+if (helpOption) helpOption.description = '显示帮助';
+cli.usage('<command> [options]');
 cli.parse();
+if (process.argv.length === 2) cli.outputHelp();

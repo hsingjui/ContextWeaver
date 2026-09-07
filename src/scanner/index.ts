@@ -69,9 +69,24 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
     if (config && indexer) {
       const fingerprint = sha256(
         JSON.stringify({
-          model: config.model,
-          baseUrl: config.baseUrl,
-          dimensions: config.dimensions,
+          embedding:
+            config.provider === 'local'
+              ? {
+                  provider: config.provider,
+                  model: config.model,
+                  revision: config.revision,
+                  dtype: config.dtype,
+                  dimensions: config.dimensions,
+                  documentInputSpaceVersion: config.documentInputSpaceVersion,
+                }
+              : {
+                  provider: config.provider,
+                  model: config.model,
+                  baseUrl: config.baseUrl,
+                  dimensions: config.dimensions,
+                  maxContextTokens: config.maxInputChars,
+                  autoSplitLongText: config.autoSplitLongText,
+                },
           splitter: SPLITTER_CONFIG,
           maxFileSize: getMaxFileSize(),
           // 修改 grammar、分块或 vectorText 语义时递增。

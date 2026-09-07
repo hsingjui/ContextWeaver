@@ -11,8 +11,14 @@
  * - 连续成功 N 次后才提升并发数
  */
 
-import { type EmbeddingConfig, getEmbeddingConfig } from '../config.js';
+import {
+  getEmbeddingConfig,
+  type EmbeddingConfig,
+  type RemoteEmbeddingConfig,
+  type RemoteEmbeddingConfigInput,
+} from '../config.js';
 import { logger } from '../utils/logger.js';
+import { LocalEmbeddingClient } from './localEmbedding.js';
 
 /** Embedding 请求体 */
 interface EmbeddingRequest {
@@ -44,6 +50,16 @@ export interface EmbeddingResult {
   text: string;
   embedding: number[];
   index: number;
+}
+
+/** 索引、搜索和 MCP 共用的最小 Embedding 提供方契约。 */
+export interface EmbeddingProvider {
+  embed(text: string): Promise<number[]>;
+  embedBatch(
+    texts: string[],
+    batchSize?: number,
+    onProgress?: (completed: number, total: number) => void,
+  ): Promise<EmbeddingResult[]>;
 }
 
 interface ExpandedEmbeddingInputs {
@@ -352,12 +368,16 @@ function getRateLimitController(maxConcurrency: number): RateLimitController {
 /**
  * Embedding 客户端类
  */
-export class EmbeddingClient {
-  private config: EmbeddingConfig;
+export class EmbeddingClient implements EmbeddingProvider {
+  private config: RemoteEmbeddingConfig;
   private rateLimiter: RateLimitController;
 
-  constructor(config?: EmbeddingConfig) {
-    this.config = config || getEmbeddingConfig();
+  constructor(config?: RemoteEmbeddingConfigInput) {
+    const resolved = config ?? getEmbeddingConfig();
+    if (resolved.provider === 'local') {
+      throw new Error('EmbeddingClient 仅支持 remote provider');
+    }
+    this.config = { ...resolved, provider: 'remote' };
     if (
       !Number.isSafeInteger(this.config.dimensions) ||
       this.config.dimensions <= 0 ||
@@ -980,12 +1000,17 @@ export class EmbeddingClient {
 /**
  * 创建默认的 Embedding 客户端实例
  */
-let defaultClient: EmbeddingClient | null = null;
+type CachedEmbeddingClient = EmbeddingClient | LocalEmbeddingClient;
 
-export function getEmbeddingClient(): EmbeddingClient {
+let defaultClient: CachedEmbeddingClient | null = null;
+
+export function getEmbeddingClient(): EmbeddingProvider {
   const config = getEmbeddingConfig();
   if (!defaultClient || JSON.stringify(defaultClient.getConfig()) !== JSON.stringify(config)) {
-    defaultClient = new EmbeddingClient(config);
+    defaultClient =
+      config.provider === 'local'
+        ? new LocalEmbeddingClient(config)
+        : new EmbeddingClient(config);
   }
   return defaultClient;
 }

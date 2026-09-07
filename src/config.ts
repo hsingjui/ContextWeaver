@@ -14,6 +14,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
+import type { LocalModelId } from './models/index.js';
+import {
+  DEFAULT_LOCAL_MODEL_ID,
+  getLocalModelCacheDir,
+  getLocalModelDefinition,
+  isLocalModelId,
+} from './models/index.js';
 
 // 环境变量加载
 
@@ -52,20 +59,43 @@ loadEnv();
 
 // API 配置类型定义
 
-export interface EmbeddingConfig {
-  apiKey: string;
-  baseUrl: string;
+interface EmbeddingConfigBase {
   model: string;
   maxConcurrency: number;
   /** 向量维度 */
   dimensions: number;
-  /** 单条文本最大字符数（超出会拆分） */
+  /** 单条文本最大字符数（远程超出会拆分） */
   maxInputChars: number;
-  /** 单次请求最大字符预算（用于动态分批） */
+  /** 单次请求最大字符预算（远程用于动态分批） */
   maxBatchChars: number;
   /** 是否自动预拆分超长文本 */
   autoSplitLongText: boolean;
 }
+
+export interface RemoteEmbeddingConfig extends EmbeddingConfigBase {
+  provider: 'remote';
+  apiKey: string;
+  baseUrl: string;
+}
+
+export interface LocalEmbeddingConfig extends EmbeddingConfigBase {
+  provider: 'local';
+  model: LocalModelId;
+  repo: string;
+  revision: string;
+  dtype: string;
+  maxContextTokens: number;
+  cacheDir: string;
+  pooling: string;
+  documentInputSpaceVersion: string;
+}
+
+export type EmbeddingConfig = RemoteEmbeddingConfig | LocalEmbeddingConfig;
+
+/** 远程 EmbeddingClient 构造参数；provider 为兼容旧调用可省略。 */
+export type RemoteEmbeddingConfigInput = Omit<RemoteEmbeddingConfig, 'provider'> & {
+  provider?: 'remote';
+};
 
 export interface RerankerConfig {
   apiKey: string;
@@ -120,12 +150,45 @@ function parseBoolean(raw: string | undefined): boolean | null {
   return null;
 }
 
+/** 根据新旧环境变量推导 provider。 */
+function resolveEmbeddingProvider(): 'local' | 'remote' {
+  const configured = process.env.EMBEDDINGS_PROVIDER?.trim().toLowerCase();
+  if (configured === 'local' || configured === 'remote') return configured;
+  if (configured) {
+    throw new Error(`EMBEDDINGS_PROVIDER 配置无效: ${configured}，必须是 local 或 remote`);
+  }
+
+  const hasLegacyRemoteConfig =
+    process.env.EMBEDDINGS_API_KEY !== undefined ||
+    process.env.EMBEDDINGS_BASE_URL !== undefined ||
+    (process.env.EMBEDDINGS_MODEL !== undefined &&
+      !isLocalModelId(process.env.EMBEDDINGS_MODEL.trim()));
+  return hasLegacyRemoteConfig ? 'remote' : 'local';
+}
+
 /**
  * 检查 Embedding 相关环境变量是否已配置（不抛出错误）
  * @returns 检查结果，包含是否有效和缺失的变量列表
  */
 export function checkEmbeddingEnv(): EnvCheckResult {
   const missingVars: string[] = [];
+  let provider: 'local' | 'remote';
+  try {
+    provider = resolveEmbeddingProvider();
+  } catch {
+    return {
+      isValid: false,
+      missingVars: ['EMBEDDINGS_PROVIDER（必须是 local 或 remote）'],
+    };
+  }
+  const model = process.env.EMBEDDINGS_MODEL?.trim();
+
+  if (provider === 'local') {
+    if (model && !isLocalModelId(model)) {
+      missingVars.push('EMBEDDINGS_MODEL（必须是内置本地模型）');
+    }
+    return { isValid: missingVars.length === 0, missingVars };
+  }
 
   const apiKey = process.env.EMBEDDINGS_API_KEY;
   if (!apiKey || apiKey === DEFAULT_API_KEY_PLACEHOLDER) {
@@ -134,7 +197,7 @@ export function checkEmbeddingEnv(): EnvCheckResult {
   if (!process.env.EMBEDDINGS_BASE_URL) {
     missingVars.push('EMBEDDINGS_BASE_URL');
   }
-  if (!process.env.EMBEDDINGS_MODEL) {
+  if (!model) {
     missingVars.push('EMBEDDINGS_MODEL');
   }
 
@@ -169,16 +232,45 @@ export function checkRerankerEnv(): EnvCheckResult {
 }
 
 /**
- * 获取 Embedding 配置
- * @throws 如果必需的配置项缺失
+ * 获取 Embedding 配置。
+ * 未声明 provider 时，带有旧版远程字段的配置继续按 remote 解析；全新配置默认 local。
+ * @throws 如果必需的配置项缺失或本地模型名称非法
  */
 export function getEmbeddingConfig(): EmbeddingConfig {
+  const provider = resolveEmbeddingProvider();
+  const maxConcurrency = parseInt(process.env.EMBEDDINGS_MAX_CONCURRENCY || '10', 10);
+  const autoSplitLongText = parseBoolean(process.env.EMBEDDINGS_AUTO_SPLIT_LONG_TEXT);
+
+  if (provider === 'local') {
+    const modelId = process.env.EMBEDDINGS_MODEL?.trim() || DEFAULT_LOCAL_MODEL_ID;
+    const model = getLocalModelDefinition(modelId);
+    const maxInputChars = Math.max(
+      500,
+      Math.floor(model.maxContextTokens * EMBEDDING_INPUT_CHAR_RATIO),
+    );
+
+    return {
+      provider: 'local',
+      model: model.id,
+      repo: model.repo,
+      revision: model.revision,
+      dtype: model.dtype,
+      dimensions: model.dimensions,
+      maxContextTokens: model.maxContextTokens,
+      cacheDir: getLocalModelCacheDir(model.id),
+      pooling: model.pooling,
+      documentInputSpaceVersion: model.documentInputSpaceVersion,
+      maxConcurrency: Number.isNaN(maxConcurrency) ? 4 : maxConcurrency,
+      maxInputChars,
+      maxBatchChars: maxInputChars * EMBEDDING_BATCH_CHAR_MULTIPLIER,
+      autoSplitLongText: autoSplitLongText ?? false,
+    };
+  }
+
   const apiKey = process.env.EMBEDDINGS_API_KEY;
   const baseUrl = process.env.EMBEDDINGS_BASE_URL;
   const model = process.env.EMBEDDINGS_MODEL;
-  const maxConcurrency = parseInt(process.env.EMBEDDINGS_MAX_CONCURRENCY || '10', 10);
   const maxContextTokens = parsePositiveInt(process.env.EMBEDDINGS_MAX_CONTEXT_TOKENS);
-  const autoSplitLongText = parseBoolean(process.env.EMBEDDINGS_AUTO_SPLIT_LONG_TEXT);
 
   if (!apiKey) {
     throw new Error('EMBEDDINGS_API_KEY 环境变量未设置');
@@ -196,6 +288,7 @@ export function getEmbeddingConfig(): EmbeddingConfig {
   const maxBatchChars = Math.max(maxInputChars, maxInputChars * EMBEDDING_BATCH_CHAR_MULTIPLIER);
 
   return {
+    provider: 'remote',
     apiKey,
     baseUrl,
     model,

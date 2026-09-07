@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { generateProjectId } from '../../db/index.js';
 // 注意：SearchService 和 scan 改为延迟导入，避免在 MCP 启动时就加载 native 模块
 import type { ContextPack, Segment } from '../../search/types.js';
+import { buildDefaultEnvContent } from '../../utils/envTemplate.js';
 import { logger } from '../../utils/logger.js';
 
 // 工具 Schema (暴露给 LLM)
@@ -67,32 +68,8 @@ async function ensureDefaultEnvFile(): Promise<void> {
     logger.info({ configDir }, '创建配置目录');
   }
 
-  // 写入默认配置
-  const defaultEnvContent = `# ContextWeaver 示例环境变量配置文件
-
-# Embedding API 配置（必需）
-EMBEDDINGS_API_KEY=your-api-key-here
-EMBEDDINGS_BASE_URL=https://api.siliconflow.cn/v1/embeddings
-EMBEDDINGS_MODEL=BAAI/bge-m3
-EMBEDDINGS_MAX_CONCURRENCY=10
-EMBEDDINGS_DIMENSIONS=1024
-# 可选：模型上下文窗口（token），用于内部动态推导字符预算（默认 8192）
-# EMBEDDINGS_MAX_CONTEXT_TOKENS=8192
-# 可选：是否自动预拆分超长文本（默认 true；如需保留原文本语义可设为 false）
-# EMBEDDINGS_AUTO_SPLIT_LONG_TEXT=true
-
-# Reranker 配置（必需）
-RERANK_API_KEY=your-api-key-here
-RERANK_BASE_URL=https://api.siliconflow.cn/v1/rerank
-RERANK_MODEL=BAAI/bge-reranker-v2-m3
-RERANK_TOP_N=20
-
-# 索引忽略模式（可选，逗号分隔，gitignore 语法，默认已包含常见忽略项）
-# 优先级最高，可用 ! 取反默认项，例：IGNORE_PATTERNS=!dist,.next,*.generated.ts
-# IGNORE_PATTERNS=.venv,node_modules
-`;
-
-  fs.writeFileSync(envFile, defaultEnvContent);
+  // 写入默认配置（模板统一由 utils/envTemplate 生成，与 CLI init 共用）
+  fs.writeFileSync(envFile, buildDefaultEnvContent());
   logger.info({ envFile }, '已创建默认 .env 配置文件');
 }
 

@@ -64,13 +64,25 @@ pnpm add -g @hsingjui/contextweaver
 ### 初始化配置
 
 ```bash
-# 初始化配置文件（创建 ~/.contextweaver/.env）
+# 交互式配置向导（创建 ~/.contextweaver/.env）
 contextweaver init
 # 或简写
 cw init
+
+# 非交互环境（管道 / CI）或直接写入默认模板
+contextweaver init --defaults
 ```
 
-编辑 `~/.contextweaver/.env`，填入你的 API Key：
+向导会引导完成全部配置：
+
+- **Embedding 服务**：SiliconFlow / OpenAI 兼容 API / Ollama（本地）/ LM Studio（本地）/ 自定义，
+  逐项确认 Base URL、模型、向量维度；云端 API 输入 Key（掩码输入），本地模型自动跳过 Key
+- **Reranker 服务**：SiliconFlow / 自定义 / 暂不配置（检索需要 Reranker，建议配置）
+- **连通性测试**：验证地址可达、Key 有效，并核对接口实际返回的向量维度与配置是否一致，
+  不一致时可一键修正为实际值
+- 已有配置时可保留或重新配置，重新配置前旧文件自动备份为 `.env.bak`
+
+也可以直接编辑 `~/.contextweaver/.env`：
 
 ```bash
 # Embedding API 配置（必需）
@@ -92,6 +104,19 @@ RERANK_TOP_N=20
 # 忽略模式（可选，逗号分隔，gitignore 语法，可用 ! 取反默认项）
 # IGNORE_PATTERNS=.venv,node_modules
 ```
+
+### 配置体检
+
+```bash
+# 校验环境变量、目录权限、API 连通性与向量维度一致性
+contextweaver doctor
+
+# 跳过网络连通性测试
+contextweaver doctor --offline
+```
+
+体检发现任何问题时返回非零退出码，其中维度不一致（`EMBEDDINGS_DIMENSIONS` 与接口实际
+返回不符）是索引与检索失败的常见原因，体检会直接给出修正建议。
 
 ### 自定义忽略
 
@@ -117,6 +142,10 @@ contextweaver index --force
 ```
 
 索引按有限文件批次提交，失败文件和未完成的删除会在下次运行时重试。CLI 部分失败时返回非零退出码，MCP 不会把不完整索引当作已完成。
+
+CLI 索引时展示实时进度条（扫描阶段为 Spinner 动画，索引阶段为百分比进度条 + 预计剩余时间；
+管道 / CI 等非 TTY 环境自动降级为按里程碑输出纯文本），完成后输出带颜色的汇总面板。
+进度条期间 `info` 级日志只写入日志文件，`warn` / `error` 仍会在控制台显示。
 
 Embedding 模型、服务地址、维度或分块版本变化时会自动重建派生索引。升级前没有索引配置指纹的旧索引也会重建一次，产生新的 Embedding 请求。默认 100 KB 文件限制可通过 `MAX_FILE_SIZE_BYTES` 调整；增大上限会提高单批内存需求。
 
@@ -229,6 +258,13 @@ contextweaver/
 ├── src/
 │   ├── index.ts              # CLI 入口
 │   ├── config.ts             # 配置管理（环境变量）
+│   ├── cli/                  # CLI 体验层
+│   │   ├── init.ts           # init 交互式配置向导
+│   │   ├── doctor.ts         # 配置体检命令
+│   │   ├── prompts.ts        # 交互提示原语（select/input/password/confirm）
+│   │   ├── progress.ts       # 进度条与 Spinner
+│   │   ├── probe.ts          # API 连通性探测
+│   │   └── theme.ts          # 颜色 / 符号 / TTY 降级
 │   ├── api/                  # 外部 API 封装
 │   │   ├── embed.ts          # Embedding API
 │   │   └── rerank.ts         # Reranker API
