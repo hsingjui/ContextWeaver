@@ -10,7 +10,8 @@
 		"includes": [
 			"**",
 			"!**/dist",
-			"!**/node_modules"
+			"!**/node_modules",
+			"!benchmarks/retrieval/results"
 		]
 	},
 	"formatter": {

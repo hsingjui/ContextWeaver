@@ -26,7 +26,8 @@
     "build:release": "tsup src/index.ts --format esm --out-dir dist --clean",
     "dev": "tsup src/index.ts --format esm --out-dir dist --sourcemap --watch",
     "fmt": "biome check --write ./src",
-    "test": "node --test --import tsx tests/*.test.ts"
+    "test": "node --test --import tsx tests/*.test.ts",
+    "benchmark:retrieval": "tsx benchmarks/retrieval/run.ts"
   },
   "dependencies": {
     "@keqingmoe/tree-sitter": "^0.26.2",

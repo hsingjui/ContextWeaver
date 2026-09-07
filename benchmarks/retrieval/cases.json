@@ -1,0 +1,356 @@
+[
+  {
+    "id": "symbol-search-service",
+    "category": "symbol",
+    "informationRequest": "SearchService 在哪里定义？",
+    "technicalTerms": ["SearchService"],
+    "relevantFiles": ["src/search/SearchService.ts"]
+  },
+  {
+    "id": "symbol-semantic-splitter",
+    "category": "symbol",
+    "informationRequest": "SemanticSplitter 类在哪里实现？",
+    "technicalTerms": ["SemanticSplitter"],
+    "relevantFiles": ["src/chunking/SemanticSplitter.ts"]
+  },
+  {
+    "id": "symbol-shared-db",
+    "category": "symbol",
+    "informationRequest": "getSharedDb 函数在哪里定义？",
+    "technicalTerms": ["getSharedDb"],
+    "relevantFiles": ["src/db/index.ts"]
+  },
+  {
+    "id": "symbol-codebase-retrieval-handler",
+    "category": "symbol",
+    "informationRequest": "handleCodebaseRetrieval 的实现在哪里？",
+    "technicalTerms": ["handleCodebaseRetrieval"],
+    "relevantFiles": ["src/mcp/tools/codebaseRetrieval.ts"]
+  },
+  {
+    "id": "feature-semantic-chunking",
+    "category": "feature",
+    "informationRequest": "ContextWeaver 如何基于 AST 做语义分块，并处理 UTF-8 和 UTF-16 索引差异？",
+    "technicalTerms": ["rawSpan", "SourceAdapter"],
+    "relevantFiles": ["src/chunking/SemanticSplitter.ts", "src/chunking/SourceAdapter.ts"]
+  },
+  {
+    "id": "feature-hybrid-retrieval",
+    "category": "feature",
+    "informationRequest": "向量召回和词法 FTS 召回是如何融合并 rerank 的？",
+    "technicalTerms": ["RRF", "FTS", "rerank"],
+    "relevantFiles": ["src/search/SearchService.ts", "src/search/fts.ts"]
+  },
+  {
+    "id": "feature-index-persistence",
+    "category": "feature",
+    "informationRequest": "文件分块完成后，embedding、LanceDB 和 FTS 索引是如何写入的？",
+    "technicalTerms": ["indexFiles", "LanceDB", "chunks_fts"],
+    "relevantFiles": ["src/indexer/index.ts", "src/vectorStore/index.ts", "src/search/fts.ts"]
+  },
+  {
+    "id": "path-mcp-server",
+    "category": "path",
+    "informationRequest": "MCP server 的实现文件在哪里？",
+    "technicalTerms": ["startMcpServer"],
+    "relevantFiles": ["src/mcp/server.ts"]
+  },
+  {
+    "id": "path-js-ts-import-resolver",
+    "category": "path",
+    "informationRequest": "TypeScript 和 JavaScript 的 import 路径解析器在哪个文件？",
+    "technicalTerms": ["JsTsResolver"],
+    "relevantFiles": ["src/search/resolvers/JsTsResolver.ts"]
+  },
+  {
+    "id": "reference-coverage-selector",
+    "category": "reference",
+    "informationRequest": "CoverageSelector 在检索管线的什么地方被调用？",
+    "technicalTerms": ["CoverageSelector", "select"],
+    "relevantFiles": ["src/search/SearchService.ts"]
+  },
+  {
+    "id": "reference-graph-expander",
+    "category": "reference",
+    "informationRequest": "getGraphExpander 是在哪里被调用来扩展 seed chunks 的？",
+    "technicalTerms": ["getGraphExpander", "expand"],
+    "relevantFiles": ["src/search/SearchService.ts"]
+  },
+  {
+    "id": "call-chain-mcp-to-search",
+    "category": "call-chain",
+    "informationRequest": "一次 codebase retrieval 请求如何从 MCP tool 进入 SearchService 并构建 context pack？",
+    "technicalTerms": ["handleCodebaseRetrieval", "buildContextPack"],
+    "relevantFiles": ["src/mcp/tools/codebaseRetrieval.ts", "src/search/SearchService.ts"]
+  },
+  {
+    "id": "call-chain-index-command",
+    "category": "call-chain",
+    "informationRequest": "执行 index 命令后，代码如何从扫描进入 chunk、embedding，再写入向量索引？",
+    "technicalTerms": ["scan", "indexFiles", "processFiles"],
+    "relevantFiles": [
+      "src/index.ts",
+      "src/scanner/index.ts",
+      "src/indexer/index.ts",
+      "src/vectorStore/index.ts"
+    ]
+  },
+  {
+    "id": "overview-retrieval-pipeline",
+    "category": "overview",
+    "informationRequest": "完整代码检索流程如何完成召回、rerank、seed cutoff、graph expansion、coverage selection 和 context packing？",
+    "technicalTerms": ["SmartTopK", "GraphExpander", "CoverageSelector", "ContextPacker"],
+    "relevantFiles": [
+      "src/search/SearchService.ts",
+      "src/search/GraphExpander.ts",
+      "src/search/CoverageSelector.ts",
+      "src/search/ContextPacker.ts"
+    ]
+  },
+  {
+    "id": "compound-indexing-overview",
+    "category": "compound",
+    "informationRequest": "代码库中的文件怎样被发现和过滤，然后解析成语义 chunk，生成 embedding，最后持久化到索引？",
+    "technicalTerms": ["crawl", "SemanticSplitter", "Embedding", "VectorStore"],
+    "relevantFiles": [
+      "src/scanner/crawler.ts",
+      "src/scanner/processor.ts",
+      "src/chunking/SemanticSplitter.ts",
+      "src/indexer/index.ts",
+      "src/vectorStore/index.ts"
+    ]
+  },
+  {
+    "id": "symbol-embedding-client",
+    "category": "symbol",
+    "informationRequest": "EmbeddingClient 类在哪里实现？",
+    "technicalTerms": ["EmbeddingClient"],
+    "relevantFiles": ["src/api/embedding.ts"]
+  },
+  {
+    "id": "symbol-reranker-client",
+    "category": "symbol",
+    "informationRequest": "RerankerClient 的定义在哪个文件？",
+    "technicalTerms": ["RerankerClient"],
+    "relevantFiles": ["src/api/reranker.ts"]
+  },
+  {
+    "id": "symbol-with-lock",
+    "category": "symbol",
+    "informationRequest": "withLock 函数在哪里定义？",
+    "technicalTerms": ["withLock"],
+    "relevantFiles": ["src/utils/lock.ts"]
+  },
+  {
+    "id": "symbol-get-parser",
+    "category": "symbol",
+    "informationRequest": "getParser 函数的实现在哪里？",
+    "technicalTerms": ["getParser"],
+    "relevantFiles": ["src/chunking/ParserPool.ts"]
+  },
+  {
+    "id": "feature-embedding-long-input",
+    "category": "feature",
+    "informationRequest": "Embedding 输入超过模型上下文限制时，ContextWeaver 如何自动拆分、重试并聚合向量？",
+    "technicalTerms": ["EMBEDDINGS_MAX_CONTEXT_TOKENS", "auto split", "embedBatch"],
+    "relevantFiles": ["src/api/embedding.ts", "src/config.ts"]
+  },
+  {
+    "id": "feature-reranker-response-guard",
+    "category": "feature",
+    "informationRequest": "Reranker API 返回错误消息、非法 index 或异常响应时如何校验和失败？",
+    "technicalTerms": ["rerank", "response index", "error"],
+    "relevantFiles": ["src/api/reranker.ts"]
+  },
+  {
+    "id": "feature-fts-short-query",
+    "category": "feature",
+    "informationRequest": "FTS 如何处理中文短词、1 到 2 字符查询以及 trigram 不适用的情况？",
+    "technicalTerms": ["segmentQuery", "trigram", "short"],
+    "relevantFiles": ["src/search/fts.ts"]
+  },
+  {
+    "id": "feature-ignore-filtering",
+    "category": "feature",
+    "informationRequest": "扫描器如何组合默认排除规则、gitignore 和 IGNORE_PATTERNS，并处理否定规则？",
+    "technicalTerms": ["IGNORE_PATTERNS", "initFilter", "getExcludePatterns"],
+    "relevantFiles": ["src/scanner/filter.ts", "src/config.ts"]
+  },
+  {
+    "id": "path-embedding-client",
+    "category": "path",
+    "informationRequest": "负责调用 embedding API 的客户端代码在哪个文件？",
+    "technicalTerms": ["EmbeddingClient"],
+    "relevantFiles": ["src/api/embedding.ts"]
+  },
+  {
+    "id": "path-search-config",
+    "category": "path",
+    "informationRequest": "检索阶段 vectorTopK、RRF、SmartTopK 和 graph expansion 的默认参数放在哪里？",
+    "technicalTerms": ["DEFAULT_CONFIG", "vectorTopK", "smartMaxK"],
+    "relevantFiles": ["src/search/config.ts"]
+  },
+  {
+    "id": "path-resolver-registry",
+    "category": "path",
+    "informationRequest": "不同语言 import resolver 的注册入口在哪个文件？",
+    "technicalTerms": ["createResolvers", "ImportResolver"],
+    "relevantFiles": ["src/search/resolvers/index.ts"]
+  },
+  {
+    "id": "reference-embedding-config",
+    "category": "reference",
+    "informationRequest": "getEmbeddingConfig 被哪些核心组件调用来初始化 embedding 维度或客户端？",
+    "technicalTerms": ["getEmbeddingConfig"],
+    "relevantFiles": [
+      "src/api/embedding.ts",
+      "src/scanner/index.ts",
+      "src/search/SearchService.ts",
+      "src/search/GraphExpander.ts"
+    ]
+  },
+  {
+    "id": "reference-segment-query",
+    "category": "reference",
+    "informationRequest": "SearchService 在哪里复用 segmentQuery，使词法召回和 chunk token overlap 使用一致分词？",
+    "technicalTerms": ["segmentQuery", "extractQueryTokens"],
+    "relevantFiles": ["src/search/SearchService.ts", "src/search/fts.ts"]
+  },
+  {
+    "id": "reference-with-lock",
+    "category": "reference",
+    "informationRequest": "withLock 在哪些入口被用于避免并发索引同一个项目？",
+    "technicalTerms": ["withLock", "index"],
+    "relevantFiles": ["src/index.ts", "src/mcp/tools/codebaseRetrieval.ts"]
+  },
+  {
+    "id": "call-chain-search-cli",
+    "category": "call-chain",
+    "informationRequest": "执行 search CLI 后，请求怎样经过 codebase retrieval handler、索引检查，再进入 SearchService？",
+    "technicalTerms": ["search", "handleCodebaseRetrieval", "SearchService"],
+    "relevantFiles": [
+      "src/index.ts",
+      "src/mcp/tools/codebaseRetrieval.ts",
+      "src/search/SearchService.ts"
+    ]
+  },
+  {
+    "id": "call-chain-scanner-filter",
+    "category": "call-chain",
+    "informationRequest": "scan 如何初始化过滤器、crawl 文件，再把文件交给 processFiles 处理？",
+    "technicalTerms": ["scan", "initFilter", "crawl", "processFiles"],
+    "relevantFiles": [
+      "src/scanner/index.ts",
+      "src/scanner/filter.ts",
+      "src/scanner/crawler.ts",
+      "src/scanner/processor.ts"
+    ]
+  },
+  {
+    "id": "call-chain-graph-import-expansion",
+    "category": "call-chain",
+    "informationRequest": "检索 seed 产生后，import graph expansion 如何选择 resolver、解析依赖并补充相关 chunks？",
+    "technicalTerms": ["GraphExpander", "createResolvers", "expandImports"],
+    "relevantFiles": [
+      "src/search/SearchService.ts",
+      "src/search/GraphExpander.ts",
+      "src/search/resolvers/index.ts"
+    ]
+  },
+  {
+    "id": "overview-chunking-system",
+    "category": "overview",
+    "informationRequest": "代码语义分块子系统整体如何选择 parser、识别语言语义节点、转换索引域并生成 chunk？",
+    "technicalTerms": ["ParserPool", "LanguageSpec", "SourceAdapter", "SemanticSplitter"],
+    "relevantFiles": [
+      "src/chunking/ParserPool.ts",
+      "src/chunking/LanguageSpec.ts",
+      "src/chunking/SourceAdapter.ts",
+      "src/chunking/SemanticSplitter.ts"
+    ]
+  },
+  {
+    "id": "overview-scanner-system",
+    "category": "overview",
+    "informationRequest": "代码库扫描子系统如何完成过滤、遍历、语言识别、文件处理和增量索引调度？",
+    "technicalTerms": ["scan", "crawl", "initFilter", "processFiles"],
+    "relevantFiles": [
+      "src/scanner/index.ts",
+      "src/scanner/crawler.ts",
+      "src/scanner/filter.ts",
+      "src/scanner/processor.ts"
+    ]
+  },
+  {
+    "id": "overview-storage-system",
+    "category": "overview",
+    "informationRequest": "ContextWeaver 的索引存储层如何分工：SQLite 元数据、Indexer、LanceDB 向量和 FTS 分别负责什么？",
+    "technicalTerms": ["SQLite", "Indexer", "LanceDB", "FTS"],
+    "relevantFiles": [
+      "src/db/index.ts",
+      "src/indexer/index.ts",
+      "src/vectorStore/index.ts",
+      "src/search/fts.ts"
+    ]
+  },
+  {
+    "id": "overview-import-resolution",
+    "category": "overview",
+    "informationRequest": "跨文件 import 扩展系统如何组织 resolver 接口、语言 resolver 注册和 GraphExpander 调用？",
+    "technicalTerms": ["ImportResolver", "createResolvers", "GraphExpander"],
+    "relevantFiles": [
+      "src/search/GraphExpander.ts",
+      "src/search/resolvers/index.ts",
+      "src/search/resolvers/types.ts",
+      "src/search/resolvers/JsTsResolver.ts"
+    ]
+  },
+  {
+    "id": "compound-unicode-indexing",
+    "category": "compound",
+    "informationRequest": "包含中文和 emoji 的源码从读取、Tree-sitter 字节索引转换、chunk metadata 到最终索引记录，如何保证位置不乱码？",
+    "technicalTerms": ["UTF-8", "byteToChar", "rawSpan", "ChunkRecord"],
+    "relevantFiles": [
+      "src/chunking/SourceAdapter.ts",
+      "src/chunking/SemanticSplitter.ts",
+      "src/scanner/processor.ts",
+      "src/indexer/index.ts"
+    ]
+  },
+  {
+    "id": "compound-index-self-heal",
+    "category": "compound",
+    "informationRequest": "当文件 hash、embedding 维度或向量索引状态不一致时，扫描和索引流程如何检测并自愈？",
+    "technicalTerms": ["vector_index_hash", "dimensions", "invalidateIndex"],
+    "relevantFiles": [
+      "src/db/index.ts",
+      "src/scanner/index.ts",
+      "src/indexer/index.ts",
+      "src/vectorStore/index.ts"
+    ]
+  },
+  {
+    "id": "compound-mcp-auto-index",
+    "category": "compound",
+    "informationRequest": "MCP 收到 codebase retrieval 请求后，如何检查环境、加锁自动增量索引，再初始化 SearchService 执行搜索？",
+    "technicalTerms": ["ensureIndexed", "withLock", "SearchService"],
+    "relevantFiles": [
+      "src/mcp/tools/codebaseRetrieval.ts",
+      "src/utils/lock.ts",
+      "src/scanner/index.ts",
+      "src/search/SearchService.ts"
+    ]
+  },
+  {
+    "id": "compound-long-input-retrieval",
+    "category": "compound",
+    "informationRequest": "长文本在 embedding 和 rerank 两个 API 阶段分别如何受预算限制、截断或自动拆分，并最终进入检索流程？",
+    "technicalTerms": ["maxInputChars", "maxRerankChars", "embedBatch", "rerank"],
+    "relevantFiles": [
+      "src/config.ts",
+      "src/api/embedding.ts",
+      "src/api/reranker.ts",
+      "src/search/SearchService.ts"
+    ]
+  }
+]
