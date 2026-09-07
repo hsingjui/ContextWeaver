@@ -30,3 +30,6 @@
 # Python cache
 **/__pycache__/
 **/*.pyc
+
+# Runtime template hash cache (regenerated per run, never commit)
+.template-hashes.json

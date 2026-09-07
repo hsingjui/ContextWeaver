@@ -10,3 +10,4 @@ test-*
 .codex
 .pnpm-store
 .pi
+.zcode

@@ -6,7 +6,9 @@
 
 ## Overview
 
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
+ContextWeaver 是纯后端 TypeScript 项目（Node.js CLI + MCP server）：语义检索引擎，混合搜索
+（向量 + FTS5）、AST 语义分片（tree-sitter）、三阶段上下文扩展、Token 感知打包。
+无前端代码。以下规范基于 `src/` 实际代码总结，子代理实现时必须匹配这些既有模式。
 
 ---
 
@@ -14,25 +16,18 @@ This directory contains guidelines for backend development. Fill in each file wi
 
 | Guide | Description | Status |
 |-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+| [Directory Structure](./directory-structure.md) | Module organization and file layout | Filled |
+| [Database Guidelines](./database-guidelines.md) | SQLite (better-sqlite3), schema, transactions | Filled |
+| [Error Handling](./error-handling.md) | Error types, handling strategies | Filled |
+| [Quality Guidelines](./quality-guidelines.md) | Biome, tsc, node:test, forbidden patterns | Filled |
+| [Logging Guidelines](./logging-guidelines.md) | pino, log levels, MCP stdio rules | Filled |
 
 ---
 
-## How to Fill These Guidelines
+## Key Conventions (quick reference)
 
-For each guideline file:
-
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
-
----
-
-**Language**: All documentation should be written in **English**.
+- ESM + `import type`（verbatimModuleSyntax），相对导入带 `.js` 后缀。
+- 日志/错误消息用中文；标识符、类型、interface 用英文 PascalCase / camelCase。
+- 每个功能目录一个 `index.ts` barrel 文件对外导出。
+- 配置只从 `src/config.ts` 读取；所有模块在 `import './config.js'` 之后加载。
+- 数据库访问经 `src/db/`，向量存取经 `src/vectorStore/`，二者由 `vector_index_hash` 对齐。

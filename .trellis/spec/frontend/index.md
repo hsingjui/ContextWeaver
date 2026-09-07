@@ -6,7 +6,12 @@
 
 ## Overview
 
-This directory contains guidelines for frontend development. Fill in each file with your project's specific conventions.
+**本项目没有前端代码。** ContextWeaver 是纯后端 TypeScript 项目：Node.js CLI
+（`src/index.ts`）+ MCP stdio server（`src/mcp/server.ts`），无 Web/UI 层，
+package.json 中无任何前端依赖（无 React/Vue/构建前端产物）。
+
+该目录保留作为 Trellis 双 layer（backend/frontend）脚手架的占位。若未来引入
+前端（如 Web UI / VSCode 扩展），再按实际技术栈填充以下文件。
 
 ---
 
@@ -14,26 +19,20 @@ This directory contains guidelines for frontend development. Fill in each file w
 
 | Guide | Description | Status |
 |-------|-------------|--------|
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Component Guidelines](./component-guidelines.md) | Component patterns, props, composition | To fill |
-| [Hook Guidelines](./hook-guidelines.md) | Custom hooks, data fetching patterns | To fill |
-| [State Management](./state-management.md) | Local state, global state, server state | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
-| [Type Safety](./type-safety.md) | Type patterns, validation | To fill |
+| [Directory Structure](./directory-structure.md) | Component/page/hook organization | N/A — no frontend |
+| [Component Guidelines](./component-guidelines.md) | Component patterns, props, composition | N/A — no frontend |
+| [Hook Guidelines](./hook-guidelines.md) | Custom hooks, data fetching patterns | N/A — no frontend |
+| [State Management](./state-management.md) | Local state, global state, server state | N/A — no frontend |
+| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | N/A — no frontend |
+| [Type Safety](./type-safety.md) | Type patterns, validation | N/A — no frontend |
 
 ---
 
-## How to Fill These Guidelines
+## Backend-Only Development Rules (applies to ALL code in this repo)
 
-For each guideline file:
+子代理在本仓库写任何代码都遵循 backend 规范：
 
-1. Document your project's **actual conventions** (not ideals)
-2. Include **code examples** from your codebase
-3. List **forbidden patterns** and why
-4. Add **common mistakes** your team has made
-
-The goal is to help AI assistants and new team members understand how YOUR project works.
-
----
-
-**Language**: All documentation should be written in **English**.
+- TypeScript 严格模式 + ESM，`import type`（verbatimModuleSyntax）。
+- 日志/错误消息用中文；标识符用英文。
+- 相对导入带 `.js` 后缀。
+- 新功能优先 CLI 命令（cac）或 MCP 工具（`src/mcp/tools/`），不要引入前端框架。
