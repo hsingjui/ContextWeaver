@@ -11,3 +11,5 @@ test-*
 .pnpm-store
 .pi
 .zcode
+docs/retrieval-optimization-roadmap.md
+benchmarks/retrieval/results/latest.json
