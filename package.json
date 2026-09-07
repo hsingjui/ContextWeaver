@@ -22,9 +22,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsup src/index.ts src/mcp/main.ts --format esm --out-dir dist --sourcemap --clean && tsc --noEmit",
-    "build:release": "tsup src/index.ts src/mcp/main.ts --format esm --out-dir dist --clean",
-    "dev": "tsup src/index.ts src/mcp/main.ts --format esm --out-dir dist --sourcemap --watch",
+    "build": "tsup src/index.ts --format esm --out-dir dist --sourcemap --clean && tsc --noEmit",
+    "build:release": "tsup src/index.ts --format esm --out-dir dist --clean",
+    "dev": "tsup src/index.ts --format esm --out-dir dist --sourcemap --watch",
     "fmt": "biome check --write ./src",
     "test": "node --test --import tsx tests/*.test.ts"
   },
