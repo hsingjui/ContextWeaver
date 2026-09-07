@@ -75,22 +75,29 @@ contextweaver init --defaults
 
 向导会引导完成全部配置：
 
-- **Embedding 服务**：SiliconFlow / OpenAI 兼容 API / Ollama（本地）/ LM Studio（本地）/ 自定义，
-  逐项确认 Base URL、模型、向量维度；云端 API 输入 Key（掩码输入），本地模型自动跳过 Key
+- **Embedding 服务**：默认使用 ContextWeaver 内置本地模型，可选
+  `jina-embeddings-v2-base-code`、`EmbeddingGemma-300M` 或 `Qwen3-Embedding-0.6B`；
+  也可切换到 SiliconFlow、OpenAI、Ollama、LM Studio 等 OpenAI 兼容 HTTP API
 - **Reranker 服务**：SiliconFlow / 自定义 / 暂不配置（检索需要 Reranker，建议配置）
-- **连通性测试**：验证地址可达、Key 有效，并核对接口实际返回的向量维度与配置是否一致，
-  不一致时可一键修正为实际值
+- **连通性测试**：本地 Embedding 不联网；远程服务会验证地址、Key 和实际向量维度，
+  不一致时可一键修正
 - 已有配置时可保留或重新配置，重新配置前旧文件自动备份为 `.env.bak`
 
 也可以直接编辑 `~/.contextweaver/.env`：
 
 ```bash
-# Embedding API 配置（必需）
-EMBEDDINGS_API_KEY=your-api-key-here
-EMBEDDINGS_BASE_URL=https://api.siliconflow.cn/v1/embeddings
-EMBEDDINGS_MODEL=BAAI/bge-m3
-EMBEDDINGS_MAX_CONCURRENCY=10
-EMBEDDINGS_DIMENSIONS=1024
+# 默认：ContextWeaver 内置本地 Embedding
+EMBEDDINGS_PROVIDER=local
+EMBEDDINGS_MODEL=embeddinggemma-300m
+EMBEDDINGS_MAX_CONCURRENCY=1
+
+# 远程回退：改用 OpenAI 兼容 Embedding API 时替换上面的配置
+# EMBEDDINGS_PROVIDER=remote
+# EMBEDDINGS_API_KEY=your-api-key-here
+# EMBEDDINGS_BASE_URL=https://api.siliconflow.cn/v1/embeddings
+# EMBEDDINGS_MODEL=BAAI/bge-m3
+# EMBEDDINGS_MAX_CONCURRENCY=10
+# EMBEDDINGS_DIMENSIONS=1024
 
 # 单文件大小上限（可选，单位字节，默认 100 KB）
 # MAX_FILE_SIZE_BYTES=102400
@@ -104,6 +111,40 @@ RERANK_TOP_N=20
 # 忽略模式（可选，逗号分隔，gitignore 语法，可用 ! 取反默认项）
 # IGNORE_PATTERNS=.venv,node_modules
 ```
+
+### 本地 Embedding 模型
+
+`init` 只写配置，不自动下载模型。首次索引前显式安装当前模型：
+
+```bash
+# 不带 action 时等同于 model list
+contextweaver model
+contextweaver model list
+
+# 安装、切换和删除
+contextweaver model install embeddinggemma-300m
+contextweaver model install qwen3-embedding-0.6b
+contextweaver model use qwen3-embedding-0.6b
+contextweaver model remove jina-embeddings-v2-base-code
+# 自动化环境可用 --yes 跳过删除确认
+contextweaver model remove qwen3-embedding-0.6b --yes
+
+# 无法直连 Hugging Face 时，可指定可信的兼容镜像
+HF_ENDPOINT=https://your-hugging-face-mirror.example contextweaver model install embeddinggemma-300m
+```
+
+| 模型 ID | 参数量 | 维度 | 上下文 | 许可 |
+|---------|--------|------|--------|------|
+| [`jina-embeddings-v2-base-code`](https://huggingface.co/jinaai/jina-embeddings-v2-base-code) | 161M | 768 | 8192 | Apache-2.0 |
+| [`embeddinggemma-300m`](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX)（默认） | 300M | 768 | 2048 | Gemma license |
+| [`qwen3-embedding-0.6b`](https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX) | 600M | 1024 | 32768 | Apache-2.0 |
+
+模型分别缓存在 `~/.contextweaver/models/<model-id>/`，可以同时安装。除显式
+`model install` 外，索引、搜索和 MCP 都只从本地缓存加载，不会静默下载；缺少模型时会给出
+对应安装命令。Reranker 仍使用远程服务，因此完整检索并非完全离线。
+
+未设置 `EMBEDDINGS_PROVIDER` 时，包含旧版 `EMBEDDINGS_API_KEY`、
+`EMBEDDINGS_BASE_URL` 或非内置模型名的配置仍按 `remote` 解析，已有配置无需立即迁移。
 
 ### 配置体检
 
@@ -313,11 +354,12 @@ contextweaver/
 
 | 变量名 | 必需 | 默认值 | 描述 |
 |--------|------|--------|------|
-| `EMBEDDINGS_API_KEY` | ✅ | - | Embedding API 密钥 |
-| `EMBEDDINGS_BASE_URL` | ✅ | - | Embedding API 地址 |
-| `EMBEDDINGS_MODEL` | ✅ | - | Embedding 模型名称 |
-| `EMBEDDINGS_MAX_CONCURRENCY` | ❌ | 10 | Embedding 并发数 |
-| `EMBEDDINGS_DIMENSIONS` | ❌ | 1024 | 向量维度 |
+| `EMBEDDINGS_PROVIDER` | ❌ | `local` | `local`（进程内模型）或 `remote`（OpenAI 兼容 API） |
+| `EMBEDDINGS_MODEL` | local 可选 / remote 必需 | `embeddinggemma-300m` | 本地模型 ID；远程模式下为 API 模型名称 |
+| `EMBEDDINGS_API_KEY` | 仅 remote | - | 远程 Embedding API 密钥 |
+| `EMBEDDINGS_BASE_URL` | 仅 remote | - | 远程 Embedding API 地址 |
+| `EMBEDDINGS_MAX_CONCURRENCY` | ❌ | 10 | Embedding 并发数；本地默认模板写入 1 |
+| `EMBEDDINGS_DIMENSIONS` | 仅 remote | 1024 | 远程向量维度；本地维度由模型目录固定 |
 | `RERANK_API_KEY` | ✅ | - | Reranker API 密钥 |
 | `RERANK_BASE_URL` | ✅ | - | Reranker API 地址 |
 | `RERANK_MODEL` | ✅ | - | Reranker 模型名称 |

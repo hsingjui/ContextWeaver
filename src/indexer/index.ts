@@ -9,7 +9,7 @@
  */
 
 import type Database from 'better-sqlite3';
-import { getEmbeddingClient, type EmbeddingProvider } from '../api/embedding.js';
+import { type EmbeddingProvider, getEmbeddingClient } from '../api/embedding.js';
 import type { ProcessedChunk } from '../chunking/types.js';
 import {
   batchUpdateVectorIndexHash,
@@ -242,6 +242,7 @@ export class Indexer {
         db,
         files.map((f) => f.path),
       );
+      if (this.embeddingClient.getConfig().provider === 'local') throw err;
       return { success: 0, errors: files.length };
     }
 

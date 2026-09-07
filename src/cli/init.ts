@@ -10,6 +10,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DEFAULT_LOCAL_MODEL_ID, type LocalModelId, listLocalModels } from '../models/index.js';
 import {
   buildDefaultEnvContent,
   buildEnvContent,
@@ -17,15 +18,10 @@ import {
   type EnvRerankerAnswers,
   parseEnvVars,
 } from '../utils/envTemplate.js';
-import {
-  DEFAULT_LOCAL_MODEL_ID,
-  listLocalModels,
-  type LocalModelId,
-} from '../models/index.js';
 import { logger } from '../utils/logger.js';
 import { probeEmbedding, probeReranker } from './probe.js';
-import { confirm, input, isInteractive, NonInteractiveError, password, select } from './prompts.js';
 import { Spinner } from './progress.js';
+import { confirm, input, isInteractive, NonInteractiveError, password, select } from './prompts.js';
 import { color, intro, log, maskSecret, note, outro, symbol, writeLine } from './theme.js';
 
 interface EmbeddingProviderPreset {
@@ -41,7 +37,7 @@ interface EmbeddingProviderPreset {
 const EMBEDDING_PROVIDERS: EmbeddingProviderPreset[] = [
   {
     value: 'local',
-    label: 'ContextWeaver 内置本地模型',
+    label: '本地模型',
     kind: 'local',
     model: DEFAULT_LOCAL_MODEL_ID,
     hint: 'CPU 离线推理，无需 Embedding API；默认 EmbeddingGemma-300M',
@@ -50,37 +46,10 @@ const EMBEDDING_PROVIDERS: EmbeddingProviderPreset[] = [
     value: 'siliconflow',
     label: 'SiliconFlow',
     kind: 'remote',
-    baseUrl: 'https://api.siliconflow.cn/v1/embeddings',
+    baseUrl: 'https://api.siliconflow.cn/v1',
     model: 'BAAI/bge-m3',
     dimensions: '1024',
     hint: '国内云端 API，推荐',
-  },
-  {
-    value: 'openai',
-    label: 'OpenAI / OpenAI 兼容 API',
-    kind: 'remote',
-    baseUrl: 'https://api.openai.com/v1/embeddings',
-    model: 'text-embedding-3-small',
-    dimensions: '1536',
-    hint: '官方或任意兼容网关',
-  },
-  {
-    value: 'ollama',
-    label: 'Ollama（OpenAI 兼容 API）',
-    kind: 'remote',
-    baseUrl: 'http://localhost:11434/v1/embeddings',
-    model: 'bge-m3',
-    dimensions: '1024',
-    hint: '需先 ollama pull bge-m3；仍通过 HTTP 调用',
-  },
-  {
-    value: 'lmstudio',
-    label: 'LM Studio（OpenAI 兼容 API）',
-    kind: 'remote',
-    baseUrl: 'http://localhost:1234/v1/embeddings',
-    model: 'text-embedding-nomic-embed-text-v1.5',
-    dimensions: '768',
-    hint: '本地 GUI 服务；仍按 remote provider 配置',
   },
   {
     value: 'custom',
@@ -89,7 +58,7 @@ const EMBEDDING_PROVIDERS: EmbeddingProviderPreset[] = [
     baseUrl: '',
     model: '',
     dimensions: '1024',
-    hint: '手动输入全部参数',
+    hint: '手动输入全部参数，适用于 OpenAI / Ollama / LM Studio 等',
   },
 ];
 
@@ -97,7 +66,7 @@ const RERANKER_PROVIDERS = [
   {
     value: 'siliconflow',
     label: 'SiliconFlow',
-    baseUrl: 'https://api.siliconflow.cn/v1/rerank',
+    baseUrl: 'https://api.siliconflow.cn/v1',
     model: 'BAAI/bge-reranker-v2-m3',
     hint: '国内云端 API，推荐',
   },
@@ -121,7 +90,7 @@ type RerankerChoice = (typeof RERANKER_PROVIDERS)[number]['value'];
 
 function validateHttpUrl(value: string): true | string {
   if (/^https?:\/\/.+/i.test(value.trim())) return true;
-  return '必须是以 http:// 或 https:// 开头的完整接口地址';
+  return '必须是以 http:// 或 https:// 开头的地址';
 }
 
 function validateNonEmpty(value: string): true | string {
@@ -228,7 +197,7 @@ async function runWizard(envFile: string, existing: boolean): Promise<void> {
   let dimensions = '';
   if (provider.kind === 'local') {
     localModel = await select<LocalModelId>({
-      message: '选择 ContextWeaver 内置本地模型',
+      message: '选择本地模型',
       initialValue: DEFAULT_LOCAL_MODEL_ID,
       options: listLocalModels().map((item) => ({
         value: item.id,
@@ -239,7 +208,7 @@ async function runWizard(envFile: string, existing: boolean): Promise<void> {
     model = localModel;
   } else {
     baseUrl = await input({
-      message: 'Embedding Base URL（完整接口地址）',
+      message: 'Embedding Base URL（以 /v1 结尾，自动拼接 /embeddings）',
       defaultValue: provider.baseUrl,
       validate: validateHttpUrl,
     });
@@ -274,7 +243,7 @@ async function runWizard(envFile: string, existing: boolean): Promise<void> {
   } else {
     const preset = RERANKER_PROVIDERS.find((item) => item.value === rerankerChoice);
     const rerankUrl = await input({
-      message: 'Reranker Base URL（完整接口地址）',
+      message: 'Reranker Base URL（以 /v1 结尾，自动拼接 /rerank）',
       defaultValue: preset?.baseUrl ? preset.baseUrl : undefined,
       validate: validateHttpUrl,
     });

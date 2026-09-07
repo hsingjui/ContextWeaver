@@ -35,7 +35,7 @@ function getLockAgeMs(lockPath: string): number | null {
  * 获取锁文件路径
  */
 function getLockFilePath(projectId: string): string {
-  return path.join(BASE_DIR, projectId, 'index.lock');
+  return path.join(BASE_DIR, 'index', projectId, 'index.lock');
 }
 
 /**

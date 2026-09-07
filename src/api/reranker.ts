@@ -5,6 +5,7 @@
  */
 
 import { getRerankerConfig, type RerankerConfig } from '../config.js';
+import { resolveEndpointUrl } from '../utils/endpointUrl.js';
 import { logger } from '../utils/logger.js';
 
 /** Rerank 请求体 */
@@ -146,7 +147,7 @@ export class RerankerClient {
       try {
         const startTime = Date.now();
 
-        const response = await fetch(this.config.baseUrl, {
+        const response = await fetch(resolveEndpointUrl(this.config.baseUrl, '/rerank'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

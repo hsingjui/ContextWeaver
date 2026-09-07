@@ -34,6 +34,7 @@ export class ProgressBar {
   private readonly write: (text: string) => void;
   private readonly useAnsi: boolean;
   private readonly barWidth: number;
+  private readonly label: string;
   private active = false;
   private startedAt = 0;
   private lastRenderAt = 0;
@@ -43,10 +44,11 @@ export class ProgressBar {
   /** 非 TTY 模式下最近一次已输出的百分比（避免同值重复输出） */
   private lastPrintedPercent = -1;
 
-  constructor(options: ProgressRendererOptions = {}) {
+  constructor(options: ProgressRendererOptions & { label?: string } = {}) {
     this.write = options.write ?? ((text: string) => process.stdout.write(text));
     this.useAnsi = options.useAnsi ?? supportsAnsi();
     this.barWidth = DEFAULT_BAR_WIDTH;
+    this.label = options.label ?? '索引进度';
   }
 
   isActive(): boolean {
@@ -81,7 +83,7 @@ export class ProgressBar {
     }
 
     if (percent >= this.nextMilestone && percent !== this.lastPrintedPercent) {
-      this.write(`索引进度 ${percent}%${message ? ` ${symbol.dot} ${message}` : ''}\n`);
+      this.write(`${this.label} ${percent}%${message ? ` ${symbol.dot} ${message}` : ''}\n`);
       this.lastPrintedPercent = percent;
       this.nextMilestone = percent + 10;
     }
@@ -99,7 +101,7 @@ export class ProgressBar {
         this.write('\n');
       }
     } else if (this.lastPercent < 100) {
-      this.write(`索引进度 100%${message ? ` ${symbol.dot} ${message}` : ''}\n`);
+      this.write(`${this.label} 100%${message ? ` ${symbol.dot} ${message}` : ''}\n`);
     }
     this.active = false;
   }

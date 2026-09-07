@@ -7,7 +7,7 @@
 ## Overview
 
 - **SQLite**，驱动为 **better-sqlite3**（同步 API，无 ORM、无 query builder、无迁移框架）。
-- 每个索引项目一个独立数据库文件：`~/.contextweaver/<projectId>/index.db`，
+- 每个索引项目一个独立数据库文件：`~/.contextweaver/index/<projectId>/index.db`，
   `projectId` 由 `generateProjectId()` 生成（路径 + 目录 birthtime 的 MD5 前 10 位）。
 - 除 SQLite 外还有 **LanceDB**（向量存储，见 `src/vectorStore/`），两者通过
   `vector_index_hash` 字段保持一致性（自愈机制）。
@@ -30,6 +30,18 @@ try {
   - `metadata(key TEXT PRIMARY KEY, value TEXT)` — 项目级配置（embedding 维度、索引指纹）
   - `pending_deletions(path TEXT PRIMARY KEY)` — 删除重试依据，派生索引清理成功前保留
   - FTS5 虚拟表 `files_fts` / `chunks_fts` 及短 token 倒排表，定义在 `src/search/fts.ts`
+
+## Index Directory Migration
+
+- **Scope / Trigger**：旧布局 `~/.contextweaver/<projectId>/` 升级到 `index/<projectId>/`。
+- **Signature**：`migrateProjectIndex(projectId: string): void`；SQLite 和 LanceDB 打开前都调用。
+- **Contract**：目标目录可能只有 `withLock()` 创建的 `index.lock`，目录存在不代表索引存在。
+  搬移时保留目标锁，包含 SQLite WAL/SHM 等文件；主文件最后搬移，让中断后仍可识别旧索引。
+- **Validation / Errors**：旧索引不存在则跳过；目标同名文件冲突在搬移前抛错，不覆盖、不删除。
+- **Cases**：目标不存在时整体 rename；目标只有锁时逐项搬移；新旧索引冲突时保留双方供人工处理。
+- **Tests**：`tests/storage-regressions.test.ts` 覆盖先加锁和先打开向量库两种顺序，断言索引内容、
+  锁文件不变；覆盖冲突时保留双方和部分文件已搬移后的重试。所有数据位于项目内隔离 HOME。
+- **Wrong / Correct**：禁止 `existsSync(newDir)` 后递归删除旧目录；应识别并迁移旧索引，冲突时停止。
 
 ## Query Patterns
 

@@ -37,15 +37,17 @@ process.stdout.on('error', (err: NodeJS.ErrnoException) => {
 const cli = cac('contextweaver');
 
 async function runModelAction(
-  action: 'install' | 'list' | 'use' | 'remove',
+  action?: string,
   model?: string,
+  options: { yes?: boolean } = {},
 ): Promise<void> {
   try {
-    await runModelCommand(action, model);
+    await runModelCommand(action, model, options);
   } catch (err) {
-    const error = err as { message?: string; stack?: string };
-    logger.error({ err, stack: error.stack }, `模型${action}失败: ${error.message}`);
-    process.exit(1);
+    if (err instanceof PromptCancelError) return;
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, consoleMessage: `模型命令失败: ${message}` }, `模型命令失败: ${message}`);
+    process.exitCode = 1;
   }
 }
 
@@ -166,26 +168,17 @@ cli
   });
 
 cli
-  .command('model install [model]', '安装内置本地 Embedding 模型')
-  .action(async (model: string | undefined) => {
-    await runModelAction('install', model);
-  });
-
-cli.command('model list', '列出内置本地 Embedding 模型及安装状态').action(async () => {
-  await runModelAction('list');
-});
-
-cli
-  .command('model use [model]', '启用已安装的本地 Embedding 模型')
-  .action(async (model: string | undefined) => {
-    await runModelAction('use', model);
-  });
-
-cli
-  .command('model remove [model]', '删除内置本地 Embedding 模型缓存')
-  .action(async (model: string | undefined) => {
-    await runModelAction('remove', model);
-  });
+  .command('model [action] [model]', '管理内置本地 Embedding 模型（默认列出状态）')
+  .option('-y, --yes', '删除模型时跳过确认')
+  .example('contextweaver model list')
+  .example('contextweaver model install embeddinggemma-300m')
+  .example('contextweaver model use qwen3-embedding-0.6b')
+  .example('contextweaver model remove jina-embeddings-v2-base-code --yes')
+  .action(
+    async (action: string | undefined, model: string | undefined, options: { yes?: boolean }) => {
+      await runModelAction(action, model, options);
+    },
+  );
 
 cli
   .command('doctor', '体检配置：环境变量、目录权限、Embedding / Reranker 连通性与模型状态')
@@ -260,7 +253,9 @@ cli.help((sections) => {
       return {
         title: color.bold('命令'),
         body: cli.commands
-          .map((command) => `  ${color.cyan(command.rawName)}\n    ${color.gray(command.description)}`)
+          .map(
+            (command) => `  ${color.cyan(command.rawName)}\n    ${color.gray(command.description)}`,
+          )
           .join('\n'),
       };
     }

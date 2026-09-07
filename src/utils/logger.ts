@@ -194,6 +194,13 @@ function createConsoleStream(): Writable {
         const color = colors[log.level] || '';
         const msg = log.msg || '';
 
+        // 命令可提供简短终端提示；完整错误仍由文件日志流记录。
+        if (typeof log.consoleMessage === 'string') {
+          interruptLineRendering();
+          process.stdout.write(`${color}${log.consoleMessage}${reset}\n`, callback);
+          return;
+        }
+
         // 提取额外的属性
         const { level: _l, time: _t, pid: _p, hostname: _h, name: _n, msg: _m, ...extra } = log;
 

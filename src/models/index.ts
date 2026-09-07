@@ -88,6 +88,7 @@ export interface ModelInstallMarker {
 export interface LocalModelStatus {
   model: LocalModelDefinition;
   installed: boolean;
+  hasCache: boolean;
   active: boolean;
 }
 
@@ -101,9 +102,7 @@ export function isLocalModelId(value: string | undefined | null): value is Local
 
 export function getLocalModelDefinition(model: string): LocalModelDefinition {
   if (!isLocalModelId(model)) {
-    throw new Error(
-      `未知的本地 Embedding 模型: ${model}。可选值: ${LOCAL_MODEL_IDS.join(', ')}`,
-    );
+    throw new Error(`未知的本地 Embedding 模型: ${model}。可选值: ${LOCAL_MODEL_IDS.join(', ')}`);
   }
   return { id: model, ...MODEL_CATALOG[model] };
 }
@@ -130,9 +129,7 @@ export function getInstallMarkerPath(model: string): string {
 }
 
 /** 只读本地标记；不会触发模型加载或网络访问。 */
-export async function readModelInstallMarker(
-  model: string,
-): Promise<ModelInstallMarker | null> {
+export async function readModelInstallMarker(model: string): Promise<ModelInstallMarker | null> {
   const definition = getLocalModelDefinition(model);
   try {
     const [stats, content] = await Promise.all([
@@ -161,12 +158,22 @@ export async function isLocalModelInstalled(model: string): Promise<boolean> {
   return (await readModelInstallMarker(model)) !== null;
 }
 
+async function hasLocalModelCache(model: LocalModelId): Promise<boolean> {
+  try {
+    return (await fs.stat(getLocalModelDir(model))).isDirectory();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
 export async function listLocalModelStatuses(): Promise<LocalModelStatus[]> {
   const active = getActiveLocalModelId();
   return Promise.all(
     listLocalModels().map(async (model) => ({
       model,
       installed: await isLocalModelInstalled(model.id),
+      hasCache: await hasLocalModelCache(model.id),
       active: active === model.id,
     })),
   );
@@ -231,6 +238,7 @@ export async function useLocalModel(model: string): Promise<void> {
   const next = setEnvValues(content, {
     EMBEDDINGS_PROVIDER: 'local',
     EMBEDDINGS_MODEL: definition.id,
+    EMBEDDINGS_DIMENSIONS: String(definition.dimensions),
   });
   if (next === content) return;
 
@@ -247,7 +255,9 @@ function getActiveLocalModelId(): LocalModelId | null {
   const provider = process.env.EMBEDDINGS_PROVIDER?.trim().toLowerCase();
   const model = process.env.EMBEDDINGS_MODEL?.trim();
   if (provider === 'remote') return null;
-  if (provider === 'local') return isLocalModelId(model) ? model : null;
+  if (provider === 'local') {
+    return model ? (isLocalModelId(model) ? model : null) : DEFAULT_LOCAL_MODEL_ID;
+  }
 
   const hasLegacyRemoteConfig =
     process.env.EMBEDDINGS_API_KEY !== undefined ||
@@ -278,15 +288,17 @@ function setEnvValues(content: string, updates: Record<string, string>): string 
   if (lines.at(-1) === '') lines.pop();
 
   for (const [key, value] of Object.entries(updates)) {
-    const pattern = new RegExp(`^(\\s*(?:export\\s+)?${escapeRegExp(key)}\\s*=\\s*)(.*?)(\\s+#.*)?$`);
-    const index = lines.findIndex((line) => pattern.test(line));
-    if (index === -1) {
-      lines.push(`${key}=${value}`);
-      continue;
+    const pattern = new RegExp(
+      `^(\\s*(?:export\\s+)?${escapeRegExp(key)}\\s*=\\s*)(.*?)(\\s+#.*)?$`,
+    );
+    let matched = false;
+    for (let index = 0; index < lines.length; index++) {
+      const match = lines[index].match(pattern);
+      if (!match) continue;
+      lines[index] = `${match[1]}${value}${match[3] ?? ''}`;
+      matched = true;
     }
-
-    const match = lines[index].match(pattern);
-    if (match) lines[index] = `${match[1]}${value}${match[3] ?? ''}`;
+    if (!matched) lines.push(`${key}=${value}`);
   }
 
   return `${lines.join(newline)}${newline}`;
@@ -310,6 +322,8 @@ async function atomicWrite(filePath: string, content: string): Promise<void> {
     await fs.rename(temporaryPath, filePath);
   } catch (error) {
     await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
-    throw new Error(`更新 ${filePath} 失败：${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `更新 ${filePath} 失败：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }

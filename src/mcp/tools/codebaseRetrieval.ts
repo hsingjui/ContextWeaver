@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
-import { generateProjectId } from '../../db/index.js';
+import { generateProjectId, migrateProjectIndex } from '../../db/index.js';
 // 注意：SearchService 和 scan 改为延迟导入，避免在 MCP 启动时就加载 native 模块
 import type { ContextPack, Segment } from '../../search/types.js';
 import { buildDefaultEnvContent } from '../../utils/envTemplate.js';
@@ -53,13 +53,13 @@ const INDEX_LOCK_TIMEOUT_MS = 10 * 60 * 1000;
  *
  * 如果 ~/.contextweaver/.env 不存在，则创建包含默认配置的文件
  */
-async function ensureDefaultEnvFile(): Promise<void> {
+async function ensureDefaultEnvFile(): Promise<boolean> {
   const configDir = BASE_DIR;
   const envFile = path.join(configDir, '.env');
 
   // 检查文件是否已存在
   if (fs.existsSync(envFile)) {
-    return;
+    return false;
   }
 
   // 创建配置目录
@@ -71,13 +71,15 @@ async function ensureDefaultEnvFile(): Promise<void> {
   // 写入默认配置（模板统一由 utils/envTemplate 生成，与 CLI init 共用）
   fs.writeFileSync(envFile, buildDefaultEnvContent());
   logger.info({ envFile }, '已创建默认 .env 配置文件');
+  return true;
 }
 
 /**
  * 检测代码库是否已初始化（数据库是否存在）
  */
 function isProjectIndexed(projectId: string): boolean {
-  const dbPath = path.join(BASE_DIR, projectId, 'index.db');
+  migrateProjectIndex(projectId);
+  const dbPath = path.join(BASE_DIR, 'index', projectId, 'index.db');
   return fs.existsSync(dbPath);
 }
 
@@ -169,16 +171,24 @@ export async function handleCodebaseRetrieval(
   );
 
   // 0. 检查必需的环境变量是否已配置（Embedding + Reranker 都是必需的）
-  const { checkEmbeddingEnv, checkRerankerEnv } = await import('../../config.js');
+  const { checkEmbeddingEnv, checkRerankerEnv, getEmbeddingConfig } = await import(
+    '../../config.js'
+  );
   const embeddingCheck = checkEmbeddingEnv();
   const rerankerCheck = checkRerankerEnv();
+  const embeddingConfig = embeddingCheck.isValid ? getEmbeddingConfig() : null;
   const allMissingVars = [...embeddingCheck.missingVars, ...rerankerCheck.missingVars];
 
   if (allMissingVars.length > 0) {
     logger.warn({ missingVars: allMissingVars }, 'MCP 环境变量未配置');
-    // 自动创建默认 .env 文件
-    await ensureDefaultEnvFile();
-    return formatEnvMissingResponse(allMissingVars);
+    const configCreated = await ensureDefaultEnvFile();
+    return formatEnvMissingResponse(allMissingVars, {
+      configCreated,
+      localModel: embeddingConfig?.provider === 'local' ? embeddingConfig.model : undefined,
+      remoteEmbedding:
+        embeddingConfig?.provider === 'remote' ||
+        process.env.EMBEDDINGS_PROVIDER?.trim().toLowerCase() === 'remote',
+    });
   }
 
   // 1. 生成项目 ID（与 CLI 保持一致：路径 + 目录创建时间）
@@ -358,33 +368,49 @@ function detectLanguage(filePath: string): string {
  *
  * 当用户未配置必需的环境变量时，返回友好的提示信息
  */
-function formatEnvMissingResponse(missingVars: string[]): {
+interface EnvMissingContext {
+  configCreated: boolean;
+  localModel?: string;
+  remoteEmbedding: boolean;
+}
+
+function formatEnvMissingResponse(
+  missingVars: string[],
+  context: EnvMissingContext,
+): {
   content: Array<{ type: 'text'; text: string }>;
 } {
   const configPath = '~/.contextweaver/.env';
+  const embeddingMissing = missingVars.some((name) => name.startsWith('EMBEDDINGS_'));
+  const rerankerMissing = missingVars.some((name) => name.startsWith('RERANK_'));
+  const actions: string[] = [];
 
-  const text = `## ⚠️ 配置缺失
+  if (context.localModel) {
+    actions.push(
+      `- 若尚未安装当前本地模型，请运行 \`contextweaver model install ${context.localModel}\`。`,
+    );
+  } else if (context.remoteEmbedding && embeddingMissing) {
+    actions.push('- 补全远程 Embedding 的 `EMBEDDINGS_*` 配置。');
+  } else if (embeddingMissing) {
+    actions.push('- 将 `EMBEDDINGS_PROVIDER` 设为 `local` 或 `remote`，并补全对应配置。');
+  }
+  if (rerankerMissing) actions.push('- 填写远程 Reranker 的 `RERANK_*` 配置。');
+  actions.push('- 保存配置后重启 ContextWeaver MCP 服务，再重新调用此工具。');
 
-ContextWeaver 需要配置 Embedding API 才能工作。
+  const text = `## 配置未完成
+
+${context.remoteEmbedding ? '当前使用远程 Embedding。' : 'ContextWeaver 默认使用内置本地 Embedding，无需 Embedding API Key。'}完整检索仍需要远程 Reranker。
 
 ### 缺失的环境变量
 ${missingVars.map((v) => `- \`${v}\``).join('\n')}
 
-### 配置步骤
+### 配置文件
 
-已自动创建配置文件：\`${configPath}\`
+${context.configCreated ? '已自动创建默认配置文件' : '请编辑配置文件'}：\`${configPath}\`
 
-请编辑该文件，填写你的 API Key：
+### 下一步
 
-\`\`\`bash
-# Embedding API 配置（必需）
-EMBEDDINGS_API_KEY=your-api-key-here  # ← 替换为你的 API Key
-
-# Reranker 配置（必需）
-RERANK_API_KEY=your-api-key-here      # ← 替换为你的 API Key
-\`\`\`
-
-保存文件后重新调用此工具即可。
+${actions.join('\n')}
 `;
 
   return {

@@ -12,11 +12,12 @@
  */
 
 import {
-  getEmbeddingConfig,
   type EmbeddingConfig,
+  getEmbeddingConfig,
   type RemoteEmbeddingConfig,
   type RemoteEmbeddingConfigInput,
 } from '../config.js';
+import { resolveEndpointUrl } from '../utils/endpointUrl.js';
 import { logger } from '../utils/logger.js';
 import { LocalEmbeddingClient } from './localEmbedding.js';
 
@@ -60,6 +61,7 @@ export interface EmbeddingProvider {
     batchSize?: number,
     onProgress?: (completed: number, total: number) => void,
   ): Promise<EmbeddingResult[]>;
+  getConfig(): EmbeddingConfig;
 }
 
 interface ExpandedEmbeddingInputs {
@@ -877,7 +879,7 @@ export class EmbeddingClient implements EmbeddingProvider {
 
     const startTime = Date.now();
 
-    const response = await fetch(this.config.baseUrl, {
+    const response = await fetch(resolveEndpointUrl(this.config.baseUrl, '/embeddings'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1008,9 +1010,7 @@ export function getEmbeddingClient(): EmbeddingProvider {
   const config = getEmbeddingConfig();
   if (!defaultClient || JSON.stringify(defaultClient.getConfig()) !== JSON.stringify(config)) {
     defaultClient =
-      config.provider === 'local'
-        ? new LocalEmbeddingClient(config)
-        : new EmbeddingClient(config);
+      config.provider === 'local' ? new LocalEmbeddingClient(config) : new EmbeddingClient(config);
   }
   return defaultClient;
 }

@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as lancedb from '@lancedb/lancedb';
+import { migrateProjectIndex } from '../db/index.js';
 
 const BASE_DIR = path.join(os.homedir(), '.contextweaver');
 
@@ -70,7 +71,7 @@ export class VectorStore {
 
   constructor(projectId: string, vectorDim = 1024) {
     this.projectId = projectId;
-    this.dbPath = path.join(BASE_DIR, projectId, 'vectors.lance');
+    this.dbPath = path.join(BASE_DIR, 'index', projectId, 'vectors.lance');
     this.vectorDim = vectorDim;
   }
 
@@ -80,8 +81,9 @@ export class VectorStore {
   async init(): Promise<void> {
     if (this.db) return;
 
+    migrateProjectIndex(this.projectId);
     // 确保目录存在
-    const projectDir = path.join(BASE_DIR, this.projectId);
+    const projectDir = path.join(BASE_DIR, 'index', this.projectId);
     if (!fs.existsSync(projectDir)) {
       fs.mkdirSync(projectDir, { recursive: true });
     }

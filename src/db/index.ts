@@ -70,13 +70,53 @@ export function generateProjectId(projectPath: string): string {
 }
 
 /**
+ * 迁移旧版索引布局（~/.contextweaver/<projectId>/ → ~/.contextweaver/index/<projectId>/）
+ * 幂等：保留锁文件；目标存在同名文件时停止，避免覆盖或删除已有索引。
+ */
+export function migrateProjectIndex(projectId: string): void {
+  const oldDir = path.join(BASE_DIR, projectId);
+  const newDir = path.join(BASE_DIR, 'index', projectId);
+  if (!fs.existsSync(oldDir)) return;
+  // 只迁移真正的索引目录，避免误动其他文件
+  const hasIndex =
+    fs.existsSync(path.join(oldDir, 'index.db')) ||
+    fs.existsSync(path.join(oldDir, 'vectors.lance'));
+  if (!hasIndex) return;
+  if (!fs.existsSync(newDir)) {
+    fs.mkdirSync(path.dirname(newDir), { recursive: true });
+    fs.renameSync(oldDir, newDir);
+    return;
+  }
+
+  // withLock 可能已创建目标目录；迁移内容时不能覆盖当前持有的锁。
+  // 主文件最后搬移，中途失败时旧目录仍可识别，重试能继续处理剩余文件。
+  const lastEntry = fs.existsSync(path.join(oldDir, 'index.db')) ? 'index.db' : 'vectors.lance';
+  const entries = fs
+    .readdirSync(oldDir)
+    .filter((entry) => entry !== 'index.lock')
+    .sort((a, b) => Number(a === lastEntry) - Number(b === lastEntry));
+  for (const entry of entries) {
+    if (fs.existsSync(path.join(newDir, entry))) {
+      throw new Error(
+        `索引迁移冲突，请先处理新旧目录中的同名文件：${oldDir} -> ${newDir} (${entry})`,
+      );
+    }
+  }
+  for (const entry of entries) {
+    fs.renameSync(path.join(oldDir, entry), path.join(newDir, entry));
+  }
+  if (fs.readdirSync(oldDir).length === 0) fs.rmdirSync(oldDir);
+}
+
+/**
  * 初始化数据库连接
  * @param projectId 项目 ID
  * @returns 数据库实例
  */
 export function initDb(projectId: string): Database.Database {
+  migrateProjectIndex(projectId);
   // 确保目录存在
-  const projectDir = path.join(BASE_DIR, projectId);
+  const projectDir = path.join(BASE_DIR, 'index', projectId);
   if (!fs.existsSync(projectDir)) {
     fs.mkdirSync(projectDir, { recursive: true });
   }

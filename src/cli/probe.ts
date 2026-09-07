@@ -5,6 +5,8 @@
  * 不记录任何 Key 信息到日志；错误映射为面向用户的中文提示。
  */
 
+import { resolveEndpointUrl } from '../utils/endpointUrl.js';
+
 export interface ProbeResult {
   ok: boolean;
   latencyMs: number;
@@ -24,7 +26,7 @@ function describeHttpError(status: number): string {
     return `鉴权失败 (${status})：请检查 API Key`;
   }
   if (status === 404) {
-    return '接口不存在 (404)：请检查 Base URL 是否为完整接口路径';
+    return `接口不存在 (${status})：请检查 Base URL 是否以 /v1 结尾`;
   }
   if (status === 400 || status === 422) {
     return `请求被拒绝 (${status})：请检查模型名称是否正确`;
@@ -63,7 +65,7 @@ export interface EmbeddingProbeParams {
 export async function probeEmbedding(params: EmbeddingProbeParams): Promise<ProbeResult> {
   const startedAt = Date.now();
   try {
-    const response = await fetch(params.baseUrl, {
+    const response = await fetch(resolveEndpointUrl(params.baseUrl, '/embeddings'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -117,7 +119,7 @@ export interface RerankerProbeParams {
 export async function probeReranker(params: RerankerProbeParams): Promise<ProbeResult> {
   const startedAt = Date.now();
   try {
-    const response = await fetch(params.baseUrl, {
+    const response = await fetch(resolveEndpointUrl(params.baseUrl, '/rerank'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

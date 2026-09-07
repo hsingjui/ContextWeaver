@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import { ProgressBar, Spinner } from '../src/cli/progress.js';
 import { maskSecret } from '../src/cli/theme.js';
+import { resolveEndpointUrl } from '../src/utils/endpointUrl.js';
 import { buildDefaultEnvContent, buildEnvContent, parseEnvVars } from '../src/utils/envTemplate.js';
 
 function collect(): { chunks: string[]; write: (text: string) => void } {
@@ -13,24 +14,24 @@ function collect(): { chunks: string[]; write: (text: string) => void } {
 test('buildEnvContent 生成完整 Embedding + Reranker 配置', () => {
   const content = buildEnvContent({
     embedding: {
-      baseUrl: 'http://localhost:11434/v1/embeddings',
+      baseUrl: 'http://localhost:11434/v1',
       model: 'bge-m3',
       apiKey: 'local-model',
       dimensions: '1024',
     },
     reranker: {
-      baseUrl: 'https://api.siliconflow.cn/v1/rerank',
+      baseUrl: 'https://api.siliconflow.cn/v1',
       model: 'BAAI/bge-reranker-v2-m3',
       apiKey: 'sk-test',
       topN: '20',
     },
   });
 
-  assert.match(content, /EMBEDDINGS_BASE_URL=http:\/\/localhost:11434\/v1\/embeddings/);
+  assert.match(content, /EMBEDDINGS_BASE_URL=http:\/\/localhost:11434\/v1/);
   assert.match(content, /EMBEDDINGS_MODEL=bge-m3/);
   assert.match(content, /EMBEDDINGS_API_KEY=local-model/);
   assert.match(content, /EMBEDDINGS_DIMENSIONS=1024/);
-  assert.match(content, /RERANK_BASE_URL=https:\/\/api\.siliconflow\.cn\/v1\/rerank/);
+  assert.match(content, /RERANK_BASE_URL=https:\/\/api\.siliconflow\.cn\/v1/);
   assert.match(content, /RERANK_API_KEY=sk-test/);
   assert.match(content, /RERANK_MODEL=BAAI\/bge-reranker-v2-m3/);
   assert.match(content, /RERANK_TOP_N=20/);
@@ -39,7 +40,7 @@ test('buildEnvContent 生成完整 Embedding + Reranker 配置', () => {
 test('buildEnvContent 跳过 Reranker 时写入占位值与提醒注释', () => {
   const content = buildEnvContent({
     embedding: {
-      baseUrl: 'https://api.siliconflow.cn/v1/embeddings',
+      baseUrl: 'https://api.siliconflow.cn/v1',
       model: 'BAAI/bge-m3',
       apiKey: 'sk-abc',
       dimensions: '1024',
@@ -49,7 +50,7 @@ test('buildEnvContent 跳过 Reranker 时写入占位值与提醒注释', () => 
 
   assert.match(content, /尚未配置/);
   assert.match(content, /RERANK_API_KEY=your-api-key-here/);
-  assert.match(content, /RERANK_BASE_URL=https:\/\/api\.siliconflow\.cn\/v1\/rerank/);
+  assert.match(content, /RERANK_BASE_URL=https:\/\/api\.siliconflow\.cn\/v1/);
 });
 
 test('buildDefaultEnvContent 生成本地 EmbeddingGemma 默认模板', () => {
@@ -62,9 +63,41 @@ test('buildDefaultEnvContent 生成本地 EmbeddingGemma 默认模板', () => {
   assert.equal(vars.EMBEDDINGS_API_KEY, undefined);
   assert.match(content, /contextweaver model install embeddinggemma-300m/);
   assert.equal(vars.RERANK_API_KEY, 'your-api-key-here');
-  assert.equal(vars.RERANK_BASE_URL, 'https://api.siliconflow.cn/v1/rerank');
+  assert.equal(vars.RERANK_BASE_URL, 'https://api.siliconflow.cn/v1');
   assert.equal(vars.RERANK_MODEL, 'BAAI/bge-reranker-v2-m3');
   assert.equal(vars.RERANK_TOP_N, '20');
+});
+
+test('resolveEndpointUrl 拼接资源路径，兼容旧版完整地址', () => {
+  assert.equal(
+    resolveEndpointUrl('https://api.siliconflow.cn/v1', '/embeddings'),
+    'https://api.siliconflow.cn/v1/embeddings',
+  );
+  assert.equal(
+    resolveEndpointUrl('https://api.siliconflow.cn/v1/', '/rerank'),
+    'https://api.siliconflow.cn/v1/rerank',
+  );
+  // 旧版 .env 写入的完整接口地址保持原样
+  assert.equal(
+    resolveEndpointUrl('https://api.siliconflow.cn/v1/rerank', '/rerank'),
+    'https://api.siliconflow.cn/v1/rerank',
+  );
+  assert.equal(
+    resolveEndpointUrl('http://localhost:11434/v1/embeddings', '/embeddings'),
+    'http://localhost:11434/v1/embeddings',
+  );
+});
+
+test('resolveEndpointUrl 只修改 pathname，保留查询参数与 fragment', () => {
+  for (const resource of ['/embeddings', '/rerank']) {
+    const suffix = '?api-version=2024-02-01&key=a%2Fb&tag=one&tag=two#section';
+    for (const pathname of ['/v1', '/v1/', `/v1${resource}`, `/v1${resource}/`]) {
+      assert.equal(
+        resolveEndpointUrl(`https://example.invalid${pathname}${suffix}`, resource),
+        `https://example.invalid/v1${resource}${suffix}`,
+      );
+    }
+  }
 });
 
 test('parseEnvVars 跳过注释、空行与无等号行', () => {

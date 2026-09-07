@@ -5,6 +5,8 @@
  * model install 命令通过 localFilesOnly=false 触发。
  */
 
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import type {
   PretrainedModelOptions,
   PretrainedTokenizerOptions,
@@ -23,6 +25,8 @@ import type { EmbeddingProvider, EmbeddingResult } from './embedding.js';
 type InputKind = 'query' | 'document';
 type FeaturePooling = 'mean' | 'last_token';
 
+const DEFAULT_MODEL_HOST = 'https://huggingface.co/';
+
 type TensorLike = {
   dims: number[];
   data: ArrayLike<number>;
@@ -34,6 +38,7 @@ type FeatureExtractor = {
     texts: string | string[],
     options?: { pooling?: FeaturePooling; normalize?: boolean },
   ): Promise<unknown>;
+  tokenizer: { config: Record<string, unknown> };
   dispose?: () => Promise<void>;
 };
 
@@ -63,7 +68,14 @@ export async function loadLocalModel(
   options: LocalModelLoadOptions,
 ): Promise<LoadedLocalModel> {
   const transformers = await import('@huggingface/transformers');
+  const cacheDir = getLocalModelDir(definition.id);
+  const remoteHost = getModelHost();
   transformers.env.allowRemoteModels = !options.localFilesOnly;
+  transformers.env.cacheDir = cacheDir;
+  transformers.env.remoteHost = remoteHost;
+  // Transformers.js 4.2 的 tokenizer 文件探测会丢失 revision/cache_dir。
+  // 固定探测 URL 到 catalog revision；实际文件仍使用显式 revision 缓存。
+  transformers.env.remotePathTemplate = `{model}/resolve/${encodeURIComponent(definition.revision)}/`;
 
   const progressCallback = (info: ProgressInfo): void => {
     options.onProgress?.({
@@ -72,7 +84,6 @@ export async function loadLocalModel(
       ...('progress' in info ? { progress: info.progress } : {}),
     });
   };
-  const cacheDir = getLocalModelDir(definition.id);
   const tokenizerOptions: PretrainedTokenizerOptions = {
     cache_dir: cacheDir,
     local_files_only: options.localFilesOnly,
@@ -85,22 +96,93 @@ export async function loadLocalModel(
     device: 'cpu',
   };
 
-  if (definition.runtime === 'sentence-embedding') {
-    const tokenizer = (await transformers.AutoTokenizer.from_pretrained(
-      definition.repo,
+  let tokenizer: Awaited<ReturnType<typeof transformers.AutoTokenizer.from_pretrained>>;
+  try {
+    if (options.localFilesOnly) await materializeTokenizerFiles(definition, cacheDir, false);
+    tokenizer = await transformers.AutoTokenizer.from_pretrained(
+      options.localFilesOnly ? cacheDir : definition.repo,
       tokenizerOptions,
-    )) as unknown as Tokenizer;
-    const model = (await transformers.AutoModel.from_pretrained(
-      definition.repo,
-      modelOptions,
-    )) as unknown as Model;
-    return new SentenceEmbeddingModel(definition, tokenizer, model);
+    );
+    if (!options.localFilesOnly) await materializeTokenizerFiles(definition, cacheDir, true);
+  } catch (error) {
+    throw describeLoadError(error, 'tokenizer', remoteHost, options.localFilesOnly);
   }
 
-  const extractor = (await transformers.pipeline('feature-extraction', definition.repo, {
-    ...modelOptions,
-  })) as unknown as FeatureExtractor;
+  let model: Awaited<ReturnType<typeof transformers.AutoModel.from_pretrained>>;
+  try {
+    model = await transformers.AutoModel.from_pretrained(definition.repo, modelOptions);
+  } catch (error) {
+    throw describeLoadError(error, '模型权重', remoteHost, options.localFilesOnly);
+  }
+
+  if (definition.runtime === 'sentence-embedding') {
+    return new SentenceEmbeddingModel(
+      definition,
+      tokenizer as unknown as Tokenizer,
+      model as unknown as Model,
+    );
+  }
+
+  // pipeline() 会先用默认 Hub 选项探测文件；直接构造 pipeline 才能保证固定 revision 和离线缓存。
+  const extractor = new transformers.FeatureExtractionPipeline({
+    task: 'feature-extraction',
+    tokenizer,
+    model,
+  }) as unknown as FeatureExtractor;
+  // FeatureExtractionPipeline 不透传 max_length，直接限制其 tokenizer 的固定上下文窗口。
+  extractor.tokenizer.config.model_max_length = definition.maxContextTokens;
   return new FeatureExtractionModel(definition, extractor);
+}
+
+async function materializeTokenizerFiles(
+  definition: LocalModelDefinition,
+  cacheDir: string,
+  overwrite: boolean,
+): Promise<void> {
+  await Promise.all(
+    ['tokenizer.json', 'tokenizer_config.json'].map(async (file) => {
+      const target = path.join(cacheDir, file);
+      if (!overwrite) {
+        try {
+          await fs.access(target);
+          return;
+        } catch {
+          // 兼容旧版 pinned-revision 缓存布局。
+        }
+      }
+      await fs.copyFile(path.join(cacheDir, definition.repo, definition.revision, file), target);
+    }),
+  );
+}
+
+function getModelHost(): string {
+  const configured = process.env.HF_ENDPOINT?.trim() || DEFAULT_MODEL_HOST;
+  let url: URL;
+  try {
+    url = new URL(configured);
+  } catch {
+    throw new Error(`HF_ENDPOINT 不是有效 URL: ${configured}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`HF_ENDPOINT 仅支持 http/https: ${configured}`);
+  }
+  url.search = '';
+  url.hash = '';
+  url.pathname = `${url.pathname.replace(/\/+$/, '')}/`;
+  return url.toString();
+}
+
+function describeLoadError(
+  error: unknown,
+  artifact: string,
+  remoteHost: string,
+  localFilesOnly: boolean,
+): Error {
+  if (localFilesOnly) return error instanceof Error ? error : new Error(String(error));
+  const message = error instanceof Error ? error.message : String(error);
+  return new Error(
+    `从模型源 ${remoteHost} 加载${artifact}失败：${message}。请检查网络，或通过 HF_ENDPOINT 设置镜像重试（例如: export HF_ENDPOINT=https://hf-mirror.com，或写入 ~/.contextweaver/.env）`,
+  );
 }
 
 export class LocalEmbeddingClient implements EmbeddingProvider {
@@ -200,10 +282,13 @@ class FeatureExtractionModel implements LoadedLocalModel {
     if (pooling !== 'mean' && pooling !== 'last_token') {
       throw new Error(`本地模型 ${this.definition.id} 的 pooling 配置无效: ${pooling}`);
     }
-    const output = await this.extractor(texts.map((text) => prepareInput(this.definition, text, kind)), {
-      pooling,
-      normalize: true,
-    });
+    const output = await this.extractor(
+      texts.map((text) => prepareInput(this.definition, text, kind)),
+      {
+        pooling,
+        normalize: true,
+      },
+    );
     return validateAndNormalize(output, texts.length, this.definition);
   }
 
@@ -264,7 +349,9 @@ function validateAndNormalize(
     let squaredNorm = 0;
     for (const value of row) {
       if (!Number.isFinite(value)) {
-        throw new Error(`本地 Embedding 向量包含非有限值: model=${definition.id}, index=${rowIndex}`);
+        throw new Error(
+          `本地 Embedding 向量包含非有限值: model=${definition.id}, index=${rowIndex}`,
+        );
       }
       squaredNorm += value * value;
     }

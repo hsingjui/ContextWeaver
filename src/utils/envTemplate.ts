@@ -80,7 +80,7 @@ export function buildEnvContent(answers: EnvAnswers): string {
       '# ===== Reranker 配置（检索必需，尚未配置）=====',
       '# 检索需要 Reranker，重新运行 contextweaver init 可补全以下配置',
       'RERANK_API_KEY=your-api-key-here',
-      'RERANK_BASE_URL=https://api.siliconflow.cn/v1/rerank',
+      'RERANK_BASE_URL=https://api.siliconflow.cn/v1',
       'RERANK_MODEL=BAAI/bge-reranker-v2-m3',
       'RERANK_TOP_N=20',
       '',
@@ -103,7 +103,7 @@ export function buildDefaultEnvContent(): string {
     embedding: { provider: 'local', model: DEFAULT_LOCAL_MODEL_ID },
     reranker: {
       apiKey: 'your-api-key-here',
-      baseUrl: 'https://api.siliconflow.cn/v1/rerank',
+      baseUrl: 'https://api.siliconflow.cn/v1',
       model: 'BAAI/bge-reranker-v2-m3',
       topN: '20',
     },

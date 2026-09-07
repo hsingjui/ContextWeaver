@@ -14,6 +14,7 @@ import {
   setStoredEmbeddingDimensions,
 } from '../db/index.js';
 import { closeIndexer, getIndexer } from '../indexer/index.js';
+import { isLocalModelInstalled } from '../models/index.js';
 import { logger } from '../utils/logger.js';
 import { closeVectorStore } from '../vectorStore/index.js';
 import { crawl } from './crawler.js';
@@ -58,13 +59,19 @@ function deletedResult(relPath: string): ProcessResult {
 /** 有限文件批次完成读取、分块、Embedding 和提交，不积累全仓库 chunks。 */
 export async function scan(rootPath: string, options: ScanOptions = {}): Promise<ScanStats> {
   const projectId = generateProjectId(rootPath);
+  const config = options.vectorIndex === false ? undefined : getEmbeddingConfig();
+  if (config?.provider === 'local' && !(await isLocalModelInstalled(config.model))) {
+    throw new Error(
+      `本地模型 ${config.model} 未安装，请先运行: contextweaver model install ${config.model}`,
+    );
+  }
+
   const db = initDb(projectId);
   try {
     const filter = await initFilter(rootPath);
     // 先验证扫描成功，再修改任何索引状态。
     const filePaths = await crawl(rootPath, filter);
     const scannedPaths = new Set(filePaths);
-    const config = options.vectorIndex === false ? undefined : getEmbeddingConfig();
     const indexer = config ? await getIndexer(projectId, config.dimensions) : undefined;
     if (config && indexer) {
       const fingerprint = sha256(
