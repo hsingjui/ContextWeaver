@@ -17,6 +17,7 @@ import { isDebugEnabled, logger } from '../utils/logger.js';
 import type { SearchResult as VectorSearchResult } from '../vectorStore/index.js';
 import { getVectorStore, type VectorStore } from '../vectorStore/index.js';
 import { ContextPacker } from './ContextPacker.js';
+import { CoverageSelector } from './CoverageSelector.js';
 import { DEFAULT_CONFIG } from './config.js';
 import {
   getTokenBoundaryRegex,
@@ -80,10 +81,16 @@ export class SearchService {
     const expanded = await this.expand(seeds, queryTokens);
     timingMs.expand = Date.now() - t0;
 
-    // 6. 打包
+    // 6. coverage-aware 选择
+    t0 = Date.now();
+    const selector = new CoverageSelector(this.config);
+    const selected = selector.select([...seeds, ...expanded]);
+    timingMs.select = Date.now() - t0;
+
+    // 7. 打包
     t0 = Date.now();
     const packer = new ContextPacker(this.projectId, this.config);
-    const files = await packer.pack([...seeds, ...expanded]);
+    const files = await packer.pack(selected);
     timingMs.pack = Date.now() - t0;
 
     return {

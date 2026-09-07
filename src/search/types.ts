@@ -39,7 +39,7 @@ export interface SearchConfig {
   decayImport: number;
   decayDepth: number;
 
-  // ContextPacker
+  // CoverageSelector / ContextPacker
   maxSegmentsPerFile: number;
   maxTotalChars: number;
 

@@ -34,7 +34,7 @@ export const DEFAULT_CONFIG: SearchConfig = {
   decayImport: 0.6,
   decayDepth: 0.7,
 
-  // ContextPacker
+  // CoverageSelector / ContextPacker
   maxSegmentsPerFile: 3,
   maxTotalChars: 48000,
 
