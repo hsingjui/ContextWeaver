@@ -9,3 +9,4 @@ dist
 test-*
 .codex
 .pnpm-store
+.pi
