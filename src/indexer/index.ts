@@ -12,6 +12,9 @@ import type Database from 'better-sqlite3';
 import { type EmbeddingProvider, getEmbeddingClient } from '../api/embedding.js';
 import type { ProcessedChunk } from '../chunking/types.js';
 import {
+  batchDeleteSymbolOccurrences,
+  batchReplaceSymbolOccurrences,
+  batchUpdateSymbolIndexHash,
   batchUpdateVectorIndexHash,
   clearVectorIndexHash,
   completeDeletions,
@@ -24,6 +27,7 @@ import {
 } from '../search/fts.js';
 import { logger } from '../utils/logger.js';
 import { type ChunkRecord, getVectorStore, type VectorStore } from '../vectorStore/index.js';
+import { extractSymbols } from './SymbolExtractor.js';
 
 // ===========================================
 // 类型定义
@@ -41,6 +45,8 @@ export interface IndexStats {
 interface FileToIndex {
   path: string;
   hash: string;
+  content: string;
+  language: string;
   chunks: ProcessedChunk[];
 }
 
@@ -103,6 +109,8 @@ export class Indexer {
             toIndex.push({
               path: result.relPath,
               hash: result.hash,
+              content: result.content ?? '',
+              language: result.language,
               chunks: result.chunks,
             });
           } else {
@@ -246,6 +254,36 @@ export class Indexer {
       return { success: 0, errors: files.length };
     }
 
+    // Exact Symbol 与向量/FTS 使用同一批文件版本；失败文件保留旧 rows，并通过独立 hash 重试。
+    const symbolExtractions = await Promise.all(
+      files.map(async (file) => {
+        try {
+          const symbols = await extractSymbols(file.path, file.language, file.content, file.chunks);
+          return {
+            path: file.path,
+            hash: file.hash,
+            ok: true as const,
+            rows: symbols.map((symbol) => ({
+              identifier: symbol.identifier,
+              kind: symbol.kind,
+              filePath: file.path,
+              chunkIndex: symbol.chunkIndex,
+              startIndex: symbol.startIndex,
+              endIndex: symbol.endIndex,
+            })),
+          };
+        } catch (error) {
+          logger.warn(
+            { path: file.path, error: (error as Error).message },
+            'Exact symbol extraction failed; preserving previous symbol rows for retry',
+          );
+          return { path: file.path, hash: file.hash, ok: false as const, rows: [] };
+        }
+      }),
+    );
+    const symbolSuccesses = symbolExtractions.filter((item) => item.ok);
+    const symbolRows = symbolSuccesses.flatMap((item) => item.rows);
+
     // ===== 阶段 3: 组装所有 ChunkRecords =====
     const filesToUpsert: Array<{ path: string; hash: string; records: ChunkRecord[] }> = [];
     const allFtsChunks: Array<{
@@ -342,6 +380,20 @@ export class Indexer {
           allFtsChunks,
           filesToUpsert.map((file) => file.path),
         );
+        const successfulPaths = new Set(successFiles.map((file) => file.path));
+        const successfulSymbolFiles = symbolSuccesses.filter((item) =>
+          successfulPaths.has(item.path),
+        );
+        const successfulSymbolPaths = successfulSymbolFiles.map((item) => item.path);
+        batchReplaceSymbolOccurrences(
+          db,
+          successfulSymbolPaths,
+          symbolRows.filter((symbol) => successfulPaths.has(symbol.filePath)),
+        );
+        batchUpdateSymbolIndexHash(
+          db,
+          successfulSymbolFiles.map((item) => ({ path: item.path, hash: item.hash })),
+        );
         batchUpdateVectorIndexHash(db, successFiles);
       })();
     } catch (err) {
@@ -371,6 +423,7 @@ export class Indexer {
     // 清理成功后才移除持久化删除标记。
     db.transaction(() => {
       if (isChunksFtsInitialized(db)) batchDeleteFileChunksFts(db, paths);
+      batchDeleteSymbolOccurrences(db, paths);
       completeDeletions(db, paths);
     })();
 
@@ -434,13 +487,6 @@ export async function getIndexer(projectId: string, vectorDim = 1024): Promise<I
     indexers.set(projectId, indexer);
   }
   return indexer;
-}
-
-/**
- * 关闭所有 Indexer
- */
-export function closeAllIndexers(): void {
-  indexers.clear();
 }
 
 export function closeIndexer(projectId: string): void {

@@ -1,13 +1,20 @@
 import '../../src/config.js';
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs, { promises as fsPromises } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkEmbeddingEnv, checkRerankerEnv } from '../../src/config.js';
-import { generateProjectId } from '../../src/db/index.js';
+import {
+  checkEmbeddingEnv,
+  checkRerankerEnv,
+  getEmbeddingConfig,
+  getRerankerConfig,
+} from '../../src/config.js';
+import { closeDb, generateProjectId, getAllFileMeta, initDb } from '../../src/db/index.js';
 import { closeIndexer } from '../../src/indexer/index.js';
 import { scan } from '../../src/scanner/index.js';
+import { DEFAULT_CONFIG } from '../../src/search/config.js';
 import { SearchService } from '../../src/search/SearchService.js';
 import { closeVectorStore } from '../../src/vectorStore/index.js';
 import {
@@ -31,6 +38,8 @@ interface BenchmarkCaseResult {
     total: number;
   };
   stages: {
+    retrieval?: NonNullable<import('../../src/search/types.js').ContextPack['debug']>['retrieval'];
+    graphAnchorTerms?: string[];
     seeds: Array<{
       filePath: string;
       chunkIndex: number;
@@ -48,16 +57,41 @@ interface BenchmarkCaseResult {
       segments: number;
       chars: number;
     }>;
+    selection?: {
+      candidates: number;
+      selectedChunks: number;
+      selectedFiles: number;
+      selectedChars: number;
+      skippedDuplicates: number;
+      skippedPerFileLimit: number;
+      skippedBudget: number;
+      skippedFileLimit: number;
+    };
   };
 }
 
 interface BenchmarkOutput {
-  schemaVersion: 1;
+  schemaVersion: 2;
   generatedAt: string;
   repoName: string;
   git: {
     commit: string | null;
     dirty: boolean | null;
+  };
+  models: {
+    embeddingProvider: string;
+    embeddingModel: string;
+    rerankerModel: string;
+  };
+  fingerprints: {
+    corpus: string;
+    cases: string;
+    searchConfig: string;
+    corpusRules: string;
+  };
+  corpus: {
+    projectId: string;
+    excludedPatterns: string[];
   };
   casesFile: string;
   summary: BenchmarkSummary;
@@ -74,7 +108,29 @@ interface CliOptions {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const defaultCasesPath = path.join(here, 'cases.json');
-const defaultOutputPath = path.join(here, 'results', 'baseline.json');
+const defaultOutputPath = path.join(here, 'results', 'latest.json');
+const BENCHMARK_EXCLUDE_PATTERNS = ['tests/', 'test/', '__tests__/'];
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function benchmarkProjectId(repoPath: string): string {
+  return `${generateProjectId(repoPath)}-retrieval-benchmark`;
+}
+
+function corpusFingerprint(projectId: string): string {
+  const db = initDb(projectId);
+  try {
+    const rows = Array.from(
+      getAllFileMeta(db),
+      ([filePath, meta]) => `${filePath}\0${meta.hash}`,
+    ).sort();
+    return sha256(rows.join('\n'));
+  } finally {
+    closeDb(db);
+  }
+}
 
 function readArg(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -201,8 +257,11 @@ function printCategorySummary(
   }
 }
 
-async function ensureIndex(repoPath: string): Promise<void> {
-  const stats = await scan(repoPath);
+async function ensureIndex(repoPath: string, projectId: string): Promise<void> {
+  const stats = await scan(repoPath, {
+    projectId,
+    extraExcludePatterns: BENCHMARK_EXCLUDE_PATTERNS,
+  });
   const errors = stats.errors + (stats.vectorIndex?.errors ?? 0);
   if (errors > 0) {
     throw new Error(`Index refresh completed with ${errors} error(s)`);
@@ -216,13 +275,22 @@ async function main(): Promise<void> {
   if (missingVars.length > 0) {
     throw new Error(`Missing retrieval environment variables: ${missingVars.join(', ')}`);
   }
+  const embedding = getEmbeddingConfig();
+  const reranker = getRerankerConfig();
+  const projectId = benchmarkProjectId(options.repoPath);
 
   if (!options.noIndex) {
-    console.log('Refreshing repository index...');
-    await ensureIndex(options.repoPath);
+    console.log('Refreshing isolated benchmark index (tests excluded)...');
+    await ensureIndex(options.repoPath, projectId);
   }
 
-  const projectId = generateProjectId(options.repoPath);
+  const fingerprints: BenchmarkOutput['fingerprints'] = {
+    corpus: corpusFingerprint(projectId),
+    cases: sha256(await fsPromises.readFile(options.casesPath, 'utf8')),
+    searchConfig: sha256(JSON.stringify(DEFAULT_CONFIG)),
+    corpusRules: sha256(JSON.stringify(BENCHMARK_EXCLUDE_PATTERNS)),
+  };
+
   const service = new SearchService(projectId, options.repoPath);
   await service.init();
 
@@ -265,6 +333,8 @@ async function main(): Promise<void> {
           total: totalMs,
         },
         stages: {
+          retrieval: contextPack.debug?.retrieval,
+          graphAnchorTerms: contextPack.debug?.graphAnchorTerms,
           seeds: contextPack.seeds.map((chunk) => ({
             filePath: chunk.filePath,
             chunkIndex: chunk.chunkIndex,
@@ -278,6 +348,7 @@ async function main(): Promise<void> {
             source: chunk.source,
           })),
           files,
+          selection: contextPack.debug?.selection,
         },
       });
 
@@ -299,10 +370,20 @@ async function main(): Promise<void> {
   }
 
   const output: BenchmarkOutput = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: new Date().toISOString(),
     repoName: path.basename(options.repoPath),
     git: gitMetadata(options.repoPath),
+    models: {
+      embeddingProvider: embedding.provider,
+      embeddingModel: embedding.model,
+      rerankerModel: reranker.model,
+    },
+    fingerprints,
+    corpus: {
+      projectId,
+      excludedPatterns: BENCHMARK_EXCLUDE_PATTERNS,
+    },
     casesFile: path.relative(options.repoPath, options.casesPath).replace(/\\/g, '/'),
     summary,
     byCategory,

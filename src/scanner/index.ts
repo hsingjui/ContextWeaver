@@ -7,12 +7,14 @@ import {
   type FileMeta,
   generateProjectId,
   getAllFileMeta,
+  getDependencyEdges,
   getPendingDeletions,
   getStoredIndexFingerprint,
   initDb,
   invalidateIndex,
   setStoredEmbeddingDimensions,
 } from '../db/index.js';
+import { ensureDependencyGraph } from '../indexer/DependencyIndexer.js';
 import { closeIndexer, getIndexer } from '../indexer/index.js';
 import { isLocalModelInstalled } from '../models/index.js';
 import { logger } from '../utils/logger.js';
@@ -40,6 +42,8 @@ export interface ScanOptions {
   force?: boolean;
   vectorIndex?: boolean;
   onProgress?: ProgressCallback;
+  projectId?: string;
+  extraExcludePatterns?: string[];
 }
 
 function deletedResult(relPath: string): ProcessResult {
@@ -58,7 +62,7 @@ function deletedResult(relPath: string): ProcessResult {
 
 /** 有限文件批次完成读取、分块、Embedding 和提交，不积累全仓库 chunks。 */
 export async function scan(rootPath: string, options: ScanOptions = {}): Promise<ScanStats> {
-  const projectId = generateProjectId(rootPath);
+  const projectId = options.projectId ?? generateProjectId(rootPath);
   const config = options.vectorIndex === false ? undefined : getEmbeddingConfig();
   if (config?.provider === 'local' && !(await isLocalModelInstalled(config.model))) {
     throw new Error(
@@ -68,7 +72,7 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
 
   const db = initDb(projectId);
   try {
-    const filter = await initFilter(rootPath);
+    const filter = await initFilter(rootPath, options.extraExcludePatterns);
     // 先验证扫描成功，再修改任何索引状态。
     const filePaths = await crawl(rootPath, filter);
     const scannedPaths = new Set(filePaths);
@@ -97,7 +101,7 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
           splitter: SPLITTER_CONFIG,
           maxFileSize: getMaxFileSize(),
           // 修改 grammar、分块或 vectorText 语义时递增。
-          indexVersion: 2,
+          indexVersion: 3,
         }),
       );
       if (getStoredIndexFingerprint(db) !== fingerprint) {
@@ -105,7 +109,7 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
         await indexer.clear();
         db.transaction(() => {
           db.exec(
-            "DELETE FROM chunks_fts; DELETE FROM fts_short_tokens WHERE kind = 'chunk'; DELETE FROM fts_short_records WHERE kind = 'chunk'; DELETE FROM fts_short_tokens_meta WHERE kind = 'chunk'",
+            "DELETE FROM chunks_fts; DELETE FROM symbol_occurrences; DELETE FROM fts_short_tokens WHERE kind = 'chunk'; DELETE FROM fts_short_records WHERE kind = 'chunk'; DELETE FROM fts_short_tokens_meta WHERE kind = 'chunk'",
           );
           invalidateIndex(db, fingerprint);
           setStoredEmbeddingDimensions(db, config.dimensions);
@@ -119,6 +123,11 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
 
     const knownFiles = getAllFileMeta(db);
     const deletedPaths = [...knownFiles.keys()].filter((file) => !scannedPaths.has(file));
+    const dependencyChangedPaths = new Set<string>();
+    // 删除 target 前先保留已知 reverse dependents；目标消失后这些 importer 需要重新解析。
+    for (const edge of getDependencyEdges(db, deletedPaths, 'reverse')) {
+      if (scannedPaths.has(edge.fromPath)) dependencyChangedPaths.add(edge.fromPath);
+    }
     // 元数据删除和待清理标记原子提交；无向量模式也不会丢失后续清理任务。
     batchDelete(db, deletedPaths);
     const stats: ScanStats = {
@@ -146,7 +155,10 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
       for (const file of batch) {
         const known = knownFiles.get(file);
         if (known) {
-          const needsIndex = options.force || (indexer && known.vectorIndexHash !== known.hash);
+          const needsIndex =
+            options.force ||
+            (indexer &&
+              (known.vectorIndexHash !== known.hash || known.symbolIndexHash !== known.hash));
           batchKnown.set(file, needsIndex ? { ...known, hash: '', mtime: -1 } : known);
         }
       }
@@ -159,6 +171,7 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
         switch (result.status) {
           case 'added':
           case 'modified':
+            if (!known || known.hash !== result.hash) dependencyChangedPaths.add(result.relPath);
             stats[known?.hash === result.hash ? 'unchanged' : result.status]++;
             toUpsert.push({
               path: result.relPath,
@@ -168,6 +181,7 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
               content: result.content,
               language: result.language,
               vectorIndexHash: null,
+              symbolIndexHash: null,
             });
             break;
           case 'unchanged':
@@ -178,7 +192,9 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
             break;
           case 'skipped':
             stats.skipped++;
-            if (known) skippedPaths.push(result.relPath);
+            if (known) {
+              skippedPaths.push(result.relPath);
+            }
             logger.debug({ path: result.relPath, reason: result.error }, '跳过文件');
             break;
           case 'error':
@@ -215,6 +231,10 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
       );
       // results 和本批 embeddings 在进入下一批前可回收。
     }
+    // Dependency edges are derived from indexed source content. A graph-version marker
+    // triggers the one-time upgrade rebuild; otherwise a no-op scan skips the O(repo) pass.
+    await ensureDependencyGraph(db, Array.from(dependencyChangedPaths));
+
     const failed = stats.errors + (stats.vectorIndex?.errors ?? 0);
     options.onProgress?.(100, 100, failed ? '索引完成（部分失败，可重试）' : '索引完成');
     return stats;

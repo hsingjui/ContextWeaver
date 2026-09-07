@@ -298,6 +298,7 @@ test('AST 中文 + emoji 文件 → 切片无乱码（索引域安全）', async
     'const 名字 = "中文字符串内容";',
     'const emoji = "🎉🚀组合";',
     'function 计算(参数一, 参数二) {',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: fixture intentionally contains template placeholders
     '  return `结果：${参数一} + ${参数二} 🎯`; // 行内注释',
     '}',
     '/**',

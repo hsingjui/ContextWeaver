@@ -25,11 +25,14 @@ import {
 // 环境变量加载
 
 const isDev = process.env.NODE_ENV === 'dev';
+const isTest = process.env.NODE_ENV === 'test';
 
 // MCP 模式检测：通过命令行参数判断（contextweaver mcp）
 export const isMcpMode = process.argv.includes('mcp');
 
 function loadEnv(): void {
+  if (isTest) return;
+
   // 可能的 .env 文件路径（按优先级排序）
   const candidates = isDev
     ? [

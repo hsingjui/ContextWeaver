@@ -263,15 +263,11 @@ test('shared DB, idempotent vector retry, expansion after stores close and file 
   const expander = await getGraphExpander(project, config);
   assert.ok((await expander.expand([scored(records[0])])).chunks.some((c) => c.chunkIndex === 1));
   await closeAllVectorStores();
-  db.prepare('INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-    'new.ts',
-    'h',
-    0,
-    0,
-    '',
-    'typescript',
-    'h',
-  );
+  db.prepare(`
+    INSERT OR REPLACE INTO files
+      (path, hash, mtime, size, content, language, vector_index_hash, symbol_index_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run('new.ts', 'h', 0, 0, '', 'typescript', 'h', 'h');
   assert.ok((await expander.expand([scored(records[0])])).chunks.some((c) => c.chunkIndex === 1));
   assert.ok(Reflect.get(expander, 'allFilePaths').has('new.ts'));
   const reopened = await getVectorStore(project, 2);
@@ -281,15 +277,11 @@ test('shared DB, idempotent vector retry, expansion after stores close and file 
   ]);
   assert.equal((await reopened.getFileChunks('file.ts')).length, 0);
   for (const file of ['a.ts', 'b.ts']) {
-    db.prepare('INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-      file,
-      'h',
-      0,
-      0,
-      "import './new';",
-      'typescript',
-      'h',
-    );
+    db.prepare(`
+      INSERT OR REPLACE INTO files
+        (path, hash, mtime, size, content, language, vector_index_hash, symbol_index_hash)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(file, 'h', 0, 0, "import './new';", 'typescript', 'h', 'h');
   }
   const imports = await expander.expand([
     { ...scored(record(0, 'a.ts')), score: 0.3 },

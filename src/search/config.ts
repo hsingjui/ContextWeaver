@@ -11,12 +11,20 @@ export const DEFAULT_CONFIG: SearchConfig = {
   ftsTopKFiles: 20,
   lexChunksPerFile: 2,
   lexTotalChunks: 40,
+  exactTopK: 40,
+  pathTopK: 20,
 
   // 融合
   rrfK0: 20,
   wVec: 0.6,
   wLex: 0.4,
+  wExact: 1.0,
+  wPath: 0.8,
   fusedTopM: 60,
+
+  // bounded query decomposition
+  maxQueryFacets: 3,
+  facetRrfWeight: 0.75,
 
   // Rerank
   rerankTopN: 10,
@@ -34,8 +42,16 @@ export const DEFAULT_CONFIG: SearchConfig = {
   decayImport: 0.6,
   decayDepth: 0.7,
 
+  // 预计算 dependency graph 扩展
+  graphFilesPerSeed: 4,
+  graphChunksPerFile: 2,
+  graphMaxDepth: 2,
+  decayDependency: 0.65,
+  dependencyDepthDecay: 0.7,
+
   // CoverageSelector / ContextPacker
   maxSegmentsPerFile: 3,
+  maxContextFiles: 8,
   maxTotalChars: 48000,
 
   // Smart TopK

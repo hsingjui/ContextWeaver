@@ -3,6 +3,7 @@
  */
 
 import type { ChunkRecord } from '../vectorStore/index.js';
+import type { RetrievalPlan } from './RetrievalPlan.js';
 
 // ===========================================
 // 配置类型
@@ -16,12 +17,20 @@ export interface SearchConfig {
   ftsTopKFiles: number;
   lexChunksPerFile: number;
   lexTotalChunks: number;
+  exactTopK: number;
+  pathTopK: number;
 
   // 融合（Phase 1）
   rrfK0: number;
   wVec: number;
   wLex: number;
+  wExact: number;
+  wPath: number;
   fusedTopM: number;
+
+  // bounded query decomposition
+  maxQueryFacets: number;
+  facetRrfWeight: number;
 
   // Rerank
   rerankTopN: number;
@@ -39,8 +48,16 @@ export interface SearchConfig {
   decayImport: number;
   decayDepth: number;
 
+  // 预计算 dependency graph
+  graphFilesPerSeed: number;
+  graphChunksPerFile: number;
+  graphMaxDepth: number;
+  decayDependency: number;
+  dependencyDepthDecay: number;
+
   // CoverageSelector / ContextPacker
   maxSegmentsPerFile: number;
+  maxContextFiles: number;
   maxTotalChars: number;
 
   // === Smart TopK ===
@@ -85,7 +102,15 @@ export interface SearchConfig {
 // ===========================================
 
 /** Chunk 来源类型 */
-export type ChunkSource = 'vector' | 'lexical' | 'neighbor' | 'breadcrumb' | 'import';
+export type ChunkSource =
+  | 'vector'
+  | 'lexical'
+  | 'exact'
+  | 'path'
+  | 'neighbor'
+  | 'breadcrumb'
+  | 'import'
+  | 'dependency';
 
 /** 带得分的 Chunk */
 export interface ScoredChunk {
@@ -99,6 +124,25 @@ export interface ScoredChunk {
   source: ChunkSource;
   /** 原始 ChunkRecord */
   record: ChunkRecord & { _distance: number };
+}
+
+/** 轻量排序快照，仅用于 benchmark/debug，不复制 chunk 文本。 */
+export interface RankedChunkTrace {
+  filePath: string;
+  chunkIndex: number;
+  score: number;
+  source: ChunkSource;
+}
+
+/** 一次 full-query/facet 召回的各通道与融合结果。 */
+export interface RetrievalCallTrace {
+  query: string;
+  intent: RetrievalPlan['intent'];
+  vector: RankedChunkTrace[];
+  lexical: RankedChunkTrace[];
+  exact: RankedChunkTrace[];
+  path: RankedChunkTrace[];
+  fused: RankedChunkTrace[];
 }
 
 /** 合并后的段 */
@@ -138,6 +182,27 @@ export interface ContextPack {
   debug?: {
     wVec: number;
     wLex: number;
+    wExact: number;
+    wPath: number;
     timingMs: Record<string, number>;
+    plan?: RetrievalPlan;
+    facets?: string[];
+    graphAnchorTerms?: string[];
+    retrieval?: {
+      calls: RetrievalCallTrace[];
+      combined: RankedChunkTrace[];
+      reranked: RankedChunkTrace[];
+      cutoff: RankedChunkTrace[];
+    };
+    selection?: {
+      candidates: number;
+      selectedChunks: number;
+      selectedFiles: number;
+      selectedChars: number;
+      skippedDuplicates: number;
+      skippedPerFileLimit: number;
+      skippedBudget: number;
+      skippedFileLimit: number;
+    };
   };
 }

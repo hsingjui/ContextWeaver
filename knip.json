@@ -1,18 +1,18 @@
 {
-    "$schema": "https://unpkg.com/knip@6/schema.json",
-    "entry": [
-        "src/index.ts"
-    ],
-    "project": [
-        "src/**/*.{ts,tsx!}"
-    ],
-    "ignore": [],
-    "ignoreDependencies": [
-        "tree-sitter-go",
-        "tree-sitter-java",
-        "tree-sitter-javascript",
-        "tree-sitter-python",
-        "tree-sitter-rust",
-        "tree-sitter-typescript"
-    ]
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": ["src/index.ts"],
+  "project": ["src/**/*.{ts,tsx!}"],
+  "ignore": [],
+  "ignoreExportsUsedInFile": true,
+  "ignoreDependencies": [
+    "tree-sitter-c",
+    "tree-sitter-c-sharp",
+    "tree-sitter-cpp",
+    "tree-sitter-go",
+    "tree-sitter-java",
+    "tree-sitter-javascript",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-typescript"
+  ]
 }

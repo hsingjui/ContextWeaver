@@ -9,7 +9,7 @@
 
 import type Database from 'better-sqlite3';
 import { getEmbeddingConfig } from '../config.js';
-import { getSharedDb } from '../db/index.js';
+import { getDependencyEdges, getSharedDb } from '../db/index.js';
 import { logger } from '../utils/logger.js';
 import { type ChunkRecord, getVectorStore, type VectorStore } from '../vectorStore/index.js';
 import { getTokenBoundaryRegex } from './fts.js';
@@ -21,6 +21,17 @@ import type { ScoredChunk, SearchConfig } from './types.js';
 // ===========================================
 
 /** 扩展结果 */
+export interface DependencyExpansionOptions {
+  expandNeighbors?: boolean;
+  expandDependencies?: boolean;
+  dependencyDirection?: 'forward' | 'reverse' | 'both';
+  dependencySeeds?: ScoredChunk[];
+  maxDependencyDepth?: number;
+  maxDependencyFiles?: number;
+  dependencyChunksPerFile?: number;
+  dependencyDecay?: number;
+}
+
 interface ExpandResult {
   chunks: ScoredChunk[];
   stats: {
@@ -28,6 +39,8 @@ interface ExpandResult {
     breadcrumbCount: number;
     importCount: number;
     importDepth1Count: number;
+    dependencyCount: number;
+    dependencyDepth1Count: number;
   };
 }
 
@@ -84,7 +97,11 @@ export class GraphExpander {
   /**
    * 扩展 seed chunks
    */
-  async expand(seeds: ScoredChunk[], queryTokens?: Set<string>): Promise<ExpandResult> {
+  async expand(
+    seeds: ScoredChunk[],
+    queryTokens?: Set<string>,
+    options: DependencyExpansionOptions = {},
+  ): Promise<ExpandResult> {
     // scan() 会关闭 VectorStore，每次扩展从工厂重新获取有效实例。
     await this.init();
 
@@ -97,6 +114,8 @@ export class GraphExpander {
       breadcrumbCount: 0,
       importCount: 0,
       importDepth1Count: 0,
+      dependencyCount: 0,
+      dependencyDepth1Count: 0,
     };
 
     if (seeds.length === 0) {
@@ -110,20 +129,39 @@ export class GraphExpander {
     // 按文件分组 seeds
     const seedsByFile = this.groupByFile(seeds);
 
-    // E1: 同文件邻居扩展
-    const neighborChunks = await this.expandNeighbors(seedsByFile, existingKeys);
-    this.addChunks(neighborChunks, expandedChunks, existingKeys);
-    stats.neighborCount = neighborChunks.length;
+    if (options.expandNeighbors !== false) {
+      // E1: 同文件邻居扩展
+      const neighborChunks = await this.expandNeighbors(seedsByFile, existingKeys);
+      this.addChunks(neighborChunks, expandedChunks, existingKeys);
+      stats.neighborCount = neighborChunks.length;
 
-    // E2: breadcrumb 补段
-    const breadcrumbChunks = await this.expandBreadcrumb(seeds, existingKeys);
-    this.addChunks(breadcrumbChunks, expandedChunks, existingKeys);
-    stats.breadcrumbCount = breadcrumbChunks.length;
+      // E2: breadcrumb 补段
+      const breadcrumbChunks = await this.expandBreadcrumb(seeds, existingKeys);
+      this.addChunks(breadcrumbChunks, expandedChunks, existingKeys);
+      stats.breadcrumbCount = breadcrumbChunks.length;
+    }
 
     // E3: 跨文件引用解析（多语言支持）
     const importChunks = await this.expandImports(seeds, existingKeys, queryTokens, stats);
     this.addChunks(importChunks, expandedChunks, existingKeys);
     stats.importCount = importChunks.length;
+
+    // E4: 索引阶段预计算的 dependency graph。默认关闭，由 RetrievalPlan 按意图开启。
+    if (options.expandDependencies) {
+      const dependencyChunks = await this.expandDependencyGraph(
+        options.dependencySeeds !== undefined ? options.dependencySeeds : seeds,
+        existingKeys,
+        queryTokens,
+        options.dependencyDirection ?? 'forward',
+        options.maxDependencyDepth ?? this.config.graphMaxDepth,
+        options.maxDependencyFiles ?? this.config.graphFilesPerSeed,
+        options.dependencyChunksPerFile ?? this.config.graphChunksPerFile,
+        options.dependencyDecay ?? this.config.decayDependency,
+        stats,
+      );
+      this.addChunks(dependencyChunks, expandedChunks, existingKeys);
+      stats.dependencyCount = dependencyChunks.length;
+    }
 
     logger.debug(stats, '上下文扩展完成');
 
@@ -421,6 +459,118 @@ export class GraphExpander {
       }
     }
     return result;
+  }
+
+  /**
+   * Expand precomputed forward/reverse dependency edges with bounded multi-hop traversal.
+   * No source files are parsed here; query time only reads SQLite edges + LanceDB chunks.
+   */
+  private async expandDependencyGraph(
+    seeds: ScoredChunk[],
+    existingKeys: Set<string>,
+    queryTokens: Set<string> | undefined,
+    direction: 'forward' | 'reverse' | 'both',
+    maxDepth: number,
+    maxFiles?: number,
+    chunksPerFile?: number,
+    dependencyDecay?: number,
+    stats?: ExpandResult['stats'],
+  ): Promise<ScoredChunk[]> {
+    const resolvedMaxFiles = maxFiles ?? this.config.graphFilesPerSeed;
+    const resolvedChunksPerFile = chunksPerFile ?? this.config.graphChunksPerFile;
+    const resolvedDependencyDecay = dependencyDecay ?? this.config.decayDependency;
+    if (
+      !this.db ||
+      !this.vectorStore ||
+      maxDepth <= 0 ||
+      resolvedMaxFiles <= 0 ||
+      resolvedChunksPerFile <= 0
+    ) {
+      return [];
+    }
+
+    const resultByKey = new Map<string, ScoredChunk>();
+    const seedScores = this.buildSeedScoreByFile(seeds);
+    const depth1Files = new Set<string>();
+
+    // graphFilesPerSeed is a per-seed quota. Each root gets its own bounded traversal, while
+    // duplicate targets across roots/chains are merged by max score in the final result.
+    for (const [seedPath, seedScore] of seedScores) {
+      let frontier = new Map([[seedPath, seedScore]]);
+      const visited = new Set([seedPath]);
+      let expandedForSeed = 0;
+
+      for (let depth = 1; depth <= maxDepth && frontier.size > 0; depth++) {
+        const edges = getDependencyEdges(this.db, Array.from(frontier.keys()), direction);
+        const targetScores = new Map<string, number>();
+
+        for (const [sourcePath, sourceScore] of frontier) {
+          const related: string[] = [];
+          for (const edge of edges) {
+            if ((direction === 'forward' || direction === 'both') && edge.fromPath === sourcePath) {
+              related.push(edge.toPath);
+            }
+            if ((direction === 'reverse' || direction === 'both') && edge.toPath === sourcePath) {
+              related.push(edge.fromPath);
+            }
+          }
+
+          for (const targetPath of new Set(related)) {
+            if (targetPath === sourcePath || visited.has(targetPath)) continue;
+            const score =
+              sourceScore *
+              resolvedDependencyDecay *
+              this.config.dependencyDepthDecay ** (depth - 1);
+            // Aggregate every path first; do not let iteration order choose the winning source.
+            targetScores.set(targetPath, Math.max(targetScores.get(targetPath) ?? 0, score));
+          }
+        }
+
+        if (targetScores.size === 0) break;
+        const remaining = resolvedMaxFiles - expandedForSeed;
+        if (remaining <= 0) break;
+        const selectedTargets = Array.from(targetScores.entries())
+          .sort(([pathA, scoreA], [pathB, scoreB]) => scoreB - scoreA || pathA.localeCompare(pathB))
+          .slice(0, remaining);
+        if (selectedTargets.length === 0) break;
+
+        const nextFrontier = new Map(selectedTargets);
+        expandedForSeed += selectedTargets.length;
+        const chunksByFile = await this.vectorStore.getFilesChunks(
+          selectedTargets.map(([targetPath]) => targetPath),
+        );
+        for (const [targetPath, score] of selectedTargets) {
+          const chunks = chunksByFile.get(targetPath) ?? [];
+          for (const chunk of this.selectImportChunks(chunks, resolvedChunksPerFile, queryTokens)) {
+            const key = `${targetPath}#${chunk.chunk_index}`;
+            if (existingKeys.has(key)) continue;
+            const previous = resultByKey.get(key);
+            if (previous) {
+              previous.score = Math.max(previous.score, score);
+            } else {
+              resultByKey.set(key, {
+                filePath: targetPath,
+                chunkIndex: chunk.chunk_index,
+                score,
+                source: 'dependency',
+                record: { ...chunk, _distance: 0 },
+              });
+            }
+          }
+        }
+
+        for (const filePath of nextFrontier.keys()) {
+          visited.add(filePath);
+          if (depth === 1) depth1Files.add(filePath);
+        }
+        frontier = nextFrontier;
+      }
+    }
+
+    if (stats) stats.dependencyDepth1Count += depth1Files.size;
+    return Array.from(resultByKey.values()).sort(
+      (a, b) => b.score - a.score || a.filePath.localeCompare(b.filePath),
+    );
   }
 
   // =========================================

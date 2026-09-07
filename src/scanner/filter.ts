@@ -40,10 +40,14 @@ function scopedPatterns(directory: string, content: string): string[] {
  * 每次扫描独立快照，目录规则按需读取一次。
  * 优先级：默认 < 根/子目录 .gitignore < IGNORE_PATTERNS。
  */
-export async function initFilter(rootPath: string): Promise<PathFilter> {
+export async function initFilter(
+  rootPath: string,
+  extraPatterns: string[] = [],
+): Promise<PathFilter> {
   const rootRules = [
     ...getExcludePatterns(),
     ...(await readOptional(path.join(rootPath, '.gitignore'))).split(/\r?\n/),
+    ...extraPatterns,
   ];
   const overrides = (process.env.IGNORE_PATTERNS || '')
     .split(',')

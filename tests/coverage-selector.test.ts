@@ -217,3 +217,49 @@ test('SearchService passes coverage-selected chunks to ContextPacker', async () 
     ContextPacker.prototype.pack = originalPack;
   }
 });
+
+test('CoverageSelector exposes stable selection diagnostics', () => {
+  const selector = new CoverageSelector(config({ maxSegmentsPerFile: 1, maxTotalChars: 60 }));
+  const duplicate = chunk('a.ts', 0, 0.95, 0, 20);
+  const result = selector.selectWithStats([
+    chunk('a.ts', 0, 1.0, 0, 20),
+    { ...duplicate, source: 'neighbor' },
+    chunk('a.ts', 1, 0.9, 20, 40),
+    chunk('b.ts', 0, 0.8, 0, 30),
+    chunk('c.ts', 0, 0.7, 0, 50),
+  ]);
+
+  assert.deepEqual(
+    result.chunks.map((item) => `${item.filePath}#${item.chunkIndex}`),
+    ['a.ts#0', 'b.ts#0'],
+  );
+  assert.deepEqual(result.stats, {
+    candidates: 5,
+    selectedChunks: 2,
+    selectedFiles: 2,
+    selectedChars: 50,
+    skippedDuplicates: 1,
+    skippedPerFileLimit: 1,
+    skippedBudget: 1,
+    skippedFileLimit: 0,
+  });
+});
+
+test('CoverageSelector caps unique files while still filling selected files', () => {
+  const selector = new CoverageSelector(
+    config({ maxSegmentsPerFile: 2, maxContextFiles: 2, maxTotalChars: 1000 }),
+  );
+  const selection = selector.selectWithStats([
+    chunk('a.ts', 0, 1.0, 0, 100),
+    chunk('b.ts', 0, 0.9, 0, 100),
+    chunk('c.ts', 0, 0.8, 0, 100),
+    chunk('a.ts', 1, 0.7, 100, 200),
+    chunk('b.ts', 1, 0.6, 100, 200),
+  ]);
+  assert.deepEqual(
+    selection.chunks.map((item) => `${item.filePath}#${item.chunkIndex}`),
+    ['a.ts#0', 'b.ts#0', 'a.ts#1', 'b.ts#1'],
+  );
+  assert.equal(selection.stats.selectedFiles, 2);
+  assert.equal(selection.stats.skippedFileLimit, 1);
+});

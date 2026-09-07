@@ -11,7 +11,11 @@
 import type Database from 'better-sqlite3';
 import { getRerankerClient } from '../api/reranker.js';
 import { getEmbeddingConfig } from '../config.js';
-import { getSharedDb } from '../db/index.js';
+import {
+  findExistingSymbolIdentifiers,
+  getSharedDb,
+  searchSymbolOccurrences,
+} from '../db/index.js';
 import { getIndexer, type Indexer } from '../indexer/index.js';
 import { isDebugEnabled, logger } from '../utils/logger.js';
 import type { SearchResult as VectorSearchResult } from '../vectorStore/index.js';
@@ -28,7 +32,16 @@ import {
   segmentQuery,
 } from './fts.js';
 import { getGraphExpander } from './GraphExpander.js';
-import type { ContextPack, ScoredChunk, SearchConfig } from './types.js';
+import { searchPaths } from './PathRecall.js';
+import { decomposeQuery } from './QueryDecomposer.js';
+import { buildRetrievalPlan, type RetrievalPlan } from './RetrievalPlan.js';
+import type {
+  ContextPack,
+  RankedChunkTrace,
+  RetrievalCallTrace,
+  ScoredChunk,
+  SearchConfig,
+} from './types.js';
 
 export class SearchService {
   private projectId: string;
@@ -58,8 +71,16 @@ export class SearchService {
     const timingMs: Record<string, number> = {};
     let t0 = Date.now();
 
-    // 1. 混合召回
-    const candidates = await this.hybridRetrieve(query);
+    const plan = buildRetrievalPlan(query);
+    const retrievalCalls: RetrievalCallTrace[] = [];
+
+    // 1. 按 RetrievalPlan 执行召回通道；compound query 保留 full query 并追加 bounded facets。
+    const facets =
+      plan.intent === 'compound' ? decomposeQuery(query, this.config.maxQueryFacets) : [];
+    const candidates =
+      facets.length > 0
+        ? await this.retrieveWithFacets(query, facets, plan, retrievalCalls)
+        : await this.hybridRetrieve(query, plan, retrievalCalls);
     timingMs.retrieve = Date.now() - t0;
 
     // 2. 取 topM
@@ -72,19 +93,29 @@ export class SearchService {
 
     // 4. Smart TopK Cutoff
     t0 = Date.now();
-    const seeds = this.applySmartCutoff(reranked);
+    const cutoffSeeds = this.applySmartCutoff(reranked, plan.maxSeeds);
+    const graphAnchorTerms =
+      plan.intent === 'reference' ? this.resolveGraphAnchorTerms(query) : undefined;
+    // Import/dependency edges are contextual hints, not symbol-call evidence. Do not relabel or
+    // over-boost reverse imports as callers; true caller semantics require symbol reference edges.
+    const seeds = cutoffSeeds;
     timingMs.smartCutoff = Date.now() - t0;
 
     // 5. 扩展（Phase 2 实现）
     t0 = Date.now();
     const queryTokens = this.extractQueryTokens(query);
-    const expanded = await this.expand(seeds, queryTokens);
+    const dependencySeeds =
+      plan.intent === 'reference'
+        ? await this.exactSymbolRetrieve(query, graphAnchorTerms ?? [])
+        : undefined;
+    const expanded = await this.expand(seeds, queryTokens, plan, dependencySeeds);
     timingMs.expand = Date.now() - t0;
 
     // 6. coverage-aware 选择
     t0 = Date.now();
     const selector = new CoverageSelector(this.config);
-    const selected = selector.select([...seeds, ...expanded]);
+    const selection = selector.selectWithStats([...seeds, ...expanded]);
+    const selected = selection.chunks;
     timingMs.select = Date.now() - t0;
 
     // 7. 打包
@@ -101,7 +132,19 @@ export class SearchService {
       debug: {
         wVec: this.config.wVec,
         wLex: this.config.wLex,
+        wExact: this.config.wExact,
+        wPath: this.config.wPath,
         timingMs,
+        selection: selection.stats,
+        plan,
+        facets,
+        graphAnchorTerms,
+        retrieval: {
+          calls: retrievalCalls,
+          combined: this.snapshotRanking(candidates),
+          reranked: this.snapshotRanking(reranked),
+          cutoff: this.snapshotRanking(cutoffSeeds),
+        },
       },
     };
   }
@@ -109,30 +152,87 @@ export class SearchService {
   // 召回方法
 
   /**
-   * 混合召回：向量 + 词法
+   * 混合召回：向量 + 词法 + exact symbol。
    */
-  private async hybridRetrieve(query: string): Promise<ScoredChunk[]> {
-    // 并行执行向量和词法召回
-    const [vectorResults, lexicalResults] = await Promise.all([
-      this.vectorRetrieve(query),
-      this.lexicalRetrieve(query),
+  private async hybridRetrieve(
+    query: string,
+    plan = buildRetrievalPlan(query),
+    trace?: RetrievalCallTrace[],
+  ): Promise<ScoredChunk[]> {
+    const [vectorResults, lexicalResults, exactResults, pathResults] = await Promise.all([
+      plan.useVector ? this.vectorRetrieve(query) : Promise.resolve([]),
+      plan.useLexical ? this.lexicalRetrieve(query) : Promise.resolve([]),
+      plan.useExact ? this.exactSymbolRetrieve(query) : Promise.resolve([]),
+      plan.usePath ? this.pathRetrieve(query) : Promise.resolve([]),
     ]);
 
     logger.debug(
       {
         vectorCount: vectorResults.length,
         lexicalCount: lexicalResults.length,
+        exactCount: exactResults.length,
+        pathCount: pathResults.length,
       },
       '混合召回完成',
     );
 
-    // 如果词法召回没有结果，直接返回向量结果
-    if (lexicalResults.length === 0) {
-      return vectorResults;
-    }
+    const fused = this.fuse(vectorResults, lexicalResults, exactResults, pathResults);
+    trace?.push({
+      query,
+      intent: plan.intent,
+      vector: this.snapshotRanking(vectorResults),
+      lexical: this.snapshotRanking(lexicalResults),
+      exact: this.snapshotRanking(exactResults),
+      path: this.snapshotRanking(pathResults),
+      fused: this.snapshotRanking(fused),
+    });
+    return fused;
+  }
 
-    // RRF 融合
-    return this.fuse(vectorResults, lexicalResults);
+  private async retrieveWithFacets(
+    query: string,
+    facets: string[],
+    plan: RetrievalPlan,
+    trace?: RetrievalCallTrace[],
+  ): Promise<ScoredChunk[]> {
+    const resultSets = await Promise.all([
+      this.hybridRetrieve(query, plan, trace),
+      ...facets.map((facet) => this.hybridRetrieve(facet, buildRetrievalPlan(facet), trace)),
+    ]);
+    return this.fuseFacetResults(resultSets);
+  }
+
+  private fuseFacetResults(resultSets: ScoredChunk[][]): ScoredChunk[] {
+    const fused = new Map<string, { score: number; chunk: ScoredChunk }>();
+    for (let queryIndex = 0; queryIndex < resultSets.length; queryIndex++) {
+      const weight = queryIndex === 0 ? 1 : this.config.facetRrfWeight;
+      const ranked = [...resultSets[queryIndex]].sort((a, b) => b.score - a.score);
+      for (let rank = 0; rank < ranked.length; rank++) {
+        const chunk = ranked[rank];
+        const key = `${chunk.filePath}#${chunk.chunkIndex}`;
+        const contribution = weight / (this.config.rrfK0 + rank);
+        const existing = fused.get(key);
+        if (existing) {
+          existing.score += contribution;
+          if (chunk.score > existing.chunk.score) existing.chunk = chunk;
+        } else {
+          fused.set(key, { score: contribution, chunk });
+        }
+      }
+    }
+    return Array.from(fused.values())
+      .map(({ score, chunk }) => ({ ...chunk, score }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, this.config.fusedTopM);
+  }
+
+  private snapshotRanking(chunks: ScoredChunk[], limit = 20): RankedChunkTrace[] {
+    return chunks.slice(0, limit).map((chunk) => ({
+      filePath: chunk.filePath,
+      chunkIndex: chunk.chunkIndex,
+      score: chunk.score,
+      source: chunk.source,
+    }));
   }
 
   /**
@@ -156,6 +256,74 @@ export class SearchService {
         record: r,
         _rank: rank, // 用于 RRF
       }));
+  }
+
+  /** File-path lexical recall, only enabled by RetrievalPlan for path/compound queries. */
+  private async pathRetrieve(query: string): Promise<ScoredChunk[]> {
+    if (!this.db || !this.vectorStore) return [];
+    const matches = searchPaths(this.db, query, this.config.pathTopK);
+    if (matches.length === 0) return [];
+    const chunksByFile = await this.vectorStore.getFilesChunks(
+      matches.map((item) => item.filePath),
+    );
+    const out: Array<ScoredChunk & { _rank: number }> = [];
+    for (const match of matches) {
+      const chunks = chunksByFile.get(match.filePath) ?? [];
+      if (chunks.length === 0) continue;
+      const queryTokens = this.extractQueryTokens(query);
+      const representative = [...chunks].sort(
+        (a, b) =>
+          this.scoreChunkTokenOverlap(b, queryTokens) -
+            this.scoreChunkTokenOverlap(a, queryTokens) || a.chunk_index - b.chunk_index,
+      )[0];
+      out.push({
+        filePath: representative.file_path,
+        chunkIndex: representative.chunk_index,
+        score: match.score,
+        source: 'path',
+        record: { ...representative, _distance: 0 },
+        _rank: out.length,
+      });
+    }
+    return out;
+  }
+
+  /** Exact definition recall backed by the Tree-sitter symbol index. */
+  private async exactSymbolRetrieve(
+    query: string,
+    identifierOverride?: string[],
+  ): Promise<ScoredChunk[]> {
+    if (!this.db || !this.vectorStore) return [];
+    const identifiers = identifierOverride ?? this.extractExactSymbolTerms(query);
+    if (identifiers.length === 0) return [];
+
+    const occurrences = searchSymbolOccurrences(this.db, identifiers, this.config.exactTopK);
+    if (occurrences.length === 0) return [];
+
+    const chunksByFile = await this.vectorStore.getFilesChunks(
+      Array.from(new Set(occurrences.map((item) => item.filePath))),
+    );
+    const results: Array<ScoredChunk & { _rank: number }> = [];
+    const seen = new Set<string>();
+    for (const occurrence of occurrences) {
+      const key = `${occurrence.filePath}#${occurrence.chunkIndex}`;
+      if (seen.has(key)) continue;
+      const chunk = chunksByFile
+        .get(occurrence.filePath)
+        ?.find((candidate) => candidate.chunk_index === occurrence.chunkIndex);
+      if (!chunk) continue;
+      seen.add(key);
+      results.push({
+        filePath: occurrence.filePath,
+        chunkIndex: occurrence.chunkIndex,
+        score: 1,
+        source: 'exact',
+        record: { ...chunk, _distance: 0 },
+        _rank: results.length,
+      });
+      if (results.length >= this.config.exactTopK) break;
+    }
+    return results;
   }
 
   /**
@@ -338,6 +506,75 @@ export class SearchService {
       .map((chunk, rank) => ({ ...chunk, _rank: rank }));
   }
 
+  private extractExactSymbolTerms(query: string): string[] {
+    const matches = query.match(/[$_\p{L}][$_\p{L}\p{N}]*/gu) ?? [];
+    const unique: string[] = [];
+    const seen = new Set<string>();
+    for (const match of matches) {
+      if (match.length < 2 || seen.has(match)) continue;
+      seen.add(match);
+      unique.push(match);
+      if (unique.length >= 32) break;
+    }
+    return unique;
+  }
+
+  /** Resolve the semantic target of a reference query from symbols that actually exist. */
+  private resolveGraphAnchorTerms(query: string): string[] {
+    if (!this.db) return [];
+    const identifiers = this.extractExactSymbolTerms(query);
+    const existing = findExistingSymbolIdentifiers(this.db, identifiers);
+    if (existing.length === 0) return [];
+    const existingSet = new Set(existing);
+    const identifier = '([$_\\p{L}][$_\\p{L}\\p{N}]*)';
+
+    // Prefer the symbol syntactically attached to the reference/call cue. This avoids the old
+    // longest-name failure: "who calls scan in Indexer" must anchor scan, not Indexer.
+    const targetPatterns = [
+      new RegExp(`\\bwho\\s+(?:calls?|uses?|references?|imports?)\\s+${identifier}`, 'iu'),
+      new RegExp(`\\b(?:calls?|uses?|references?|imports?)\\s+${identifier}`, 'iu'),
+      new RegExp(`(?:调用了?|使用了?|引用了?|导入了?|复用了?)\\s*${identifier}`, 'u'),
+      new RegExp(
+        `\\bwhere\\s+(?:is|are)\\s+${identifier}\\s+(?:used|called|referenced|imported)`,
+        'iu',
+      ),
+      new RegExp(
+        `${identifier}\\s+(?:在[^?？]{0,24})?被[^?？]{0,24}(?:调用|使用|用于|引用|导入)`,
+        'u',
+      ),
+    ];
+    for (const pattern of targetPatterns) {
+      const match = query.match(pattern);
+      const candidate = match?.[1];
+      if (candidate && existingSet.has(candidate)) return [candidate];
+    }
+
+    // Fallback: nearest real symbol to an action cue; do not infer from identifier length.
+    const cueMatches = Array.from(
+      query.matchAll(
+        /calls?|uses?|references?|imports?|used|called|调用了?|使用了?|引用了?|导入了?|复用了?|用于/giu,
+      ),
+    );
+    const queryOrder = new Map(identifiers.map((item, index) => [item, index]));
+    const score = (item: string): number => {
+      const position = query.indexOf(item);
+      if (position < 0 || cueMatches.length === 0) return 10_000 + (queryOrder.get(item) ?? 999);
+      return Math.min(
+        ...cueMatches.map((cue) => {
+          const cueStart = cue.index ?? 0;
+          const cueEnd = cueStart + cue[0].length;
+          if (position >= cueEnd) return position - cueEnd;
+          return 100 + Math.max(0, cueStart - (position + item.length));
+        }),
+      );
+    };
+    return [...existing]
+      .sort(
+        (a, b) => score(a) - score(b) || (queryOrder.get(a) ?? 999) - (queryOrder.get(b) ?? 999),
+      )
+      .slice(0, 1);
+  }
+
   /**
    * 提取查询中的 tokens
    *
@@ -391,82 +628,62 @@ export class SearchService {
   private fuse(
     vectorResults: (ScoredChunk & { _rank?: number })[],
     lexicalResults: (ScoredChunk & { _rank?: number })[],
+    exactResults: (ScoredChunk & { _rank?: number })[] = [],
+    pathResults: (ScoredChunk & { _rank?: number })[] = [],
   ): ScoredChunk[] {
-    const { rrfK0, wVec, wLex } = this.config;
-
-    // 构建 chunk_id -> 融合分数 的映射
+    const { rrfK0, wVec, wLex, wExact, wPath } = this.config;
     const fusedScores = new Map<
       string,
-      {
-        score: number;
-        chunk: ScoredChunk;
-        sources: Set<string>;
-      }
+      { score: number; chunk: ScoredChunk; sources: Set<string> }
     >();
-
-    // 辅助函数：生成唯一键
     const getKey = (chunk: ScoredChunk) => `${chunk.filePath}#${chunk.chunkIndex}`;
 
-    // 处理向量结果
-    for (const result of vectorResults) {
-      const key = getKey(result);
-      const rank = result._rank ?? 0;
-      const rrfScore = wVec / (rrfK0 + rank);
-
-      const existing = fusedScores.get(key);
-      if (existing) {
-        existing.score += rrfScore;
-        existing.sources.add('vector');
-      } else {
-        fusedScores.set(key, {
-          score: rrfScore,
-          chunk: result,
-          sources: new Set(['vector']),
-        });
+    const addChannel = (
+      results: (ScoredChunk & { _rank?: number })[],
+      weight: number,
+      source: 'vector' | 'lexical' | 'exact' | 'path',
+    ): void => {
+      for (const result of results) {
+        const key = getKey(result);
+        const rank = result._rank ?? 0;
+        const rrfScore = weight / (rrfK0 + rank);
+        const existing = fusedScores.get(key);
+        if (existing) {
+          existing.score += rrfScore;
+          existing.sources.add(source);
+        } else {
+          fusedScores.set(key, {
+            score: rrfScore,
+            chunk: result,
+            sources: new Set([source]),
+          });
+        }
       }
-    }
+    };
 
-    // 处理词法结果
-    for (const result of lexicalResults) {
-      const key = getKey(result);
-      const rank = result._rank ?? 0;
-      const rrfScore = wLex / (rrfK0 + rank);
+    addChannel(vectorResults, wVec, 'vector');
+    addChannel(lexicalResults, wLex, 'lexical');
+    addChannel(exactResults, wExact, 'exact');
+    addChannel(pathResults, wPath, 'path');
 
-      const existing = fusedScores.get(key);
-      if (existing) {
-        existing.score += rrfScore;
-        existing.sources.add('lexical');
-      } else {
-        fusedScores.set(key, {
-          score: rrfScore,
-          chunk: result,
-          sources: new Set(['lexical']),
-        });
-      }
-    }
-
-    // 转换为数组并按融合分数排序
     const fused = Array.from(fusedScores.values())
-      .map(({ score, chunk, sources }) => ({
-        ...chunk,
-        score,
-        source: sources.size > 1 ? ('vector' as const) : chunk.source, // 保留原始来源
-      }))
+      .map(({ score, chunk }) => ({ ...chunk, score }))
       .sort((a, b) => b.score - a.score);
 
-    // 惰性求值：避免生产环境下不必要的计算
     if (isDebugEnabled()) {
       logger.debug(
         {
           vectorCount: vectorResults.length,
           lexicalCount: lexicalResults.length,
+          exactCount: exactResults.length,
+          pathCount: pathResults.length,
           fusedCount: fused.length,
-          bothSources: Array.from(fusedScores.values()).filter((v) => v.sources.size > 1).length,
+          multiSource: Array.from(fusedScores.values()).filter((item) => item.sources.size > 1)
+            .length,
         },
         'RRF 融合完成',
       );
     }
-
     return fused;
   }
 
@@ -512,7 +729,7 @@ export class SearchService {
    * 3. Safe Harbor：前 minK 个只检查 floor，不检查 ratio/delta
    * 4. 去重 + 补齐：cutoff 后去重，不足 minK 时从后续补齐
    */
-  private applySmartCutoff(candidates: ScoredChunk[]): ScoredChunk[] {
+  private applySmartCutoff(candidates: ScoredChunk[], planMaxSeeds?: number): ScoredChunk[] {
     // 未启用时直接返回原列表
     if (!this.config.enableSmartTopK) {
       return candidates;
@@ -528,8 +745,9 @@ export class SearchService {
       smartTopScoreDeltaAbs: deltaAbs,
       smartMinScore: floor,
       smartMinK: minK,
-      smartMaxK: maxK,
+      smartMaxK: configuredMaxK,
     } = this.config;
+    const maxK = Math.max(1, Math.min(configuredMaxK, planMaxSeeds ?? configuredMaxK));
 
     const topScore = sorted[0].score;
 
@@ -652,11 +870,25 @@ export class SearchService {
    * - E2: breadcrumb 补段
    * - E3: 相对路径 import 解析
    */
-  private async expand(seeds: ScoredChunk[], queryTokens?: Set<string>): Promise<ScoredChunk[]> {
+  private async expand(
+    seeds: ScoredChunk[],
+    queryTokens?: Set<string>,
+    plan = buildRetrievalPlan(''),
+    dependencySeeds?: ScoredChunk[],
+  ): Promise<ScoredChunk[]> {
     if (seeds.length === 0) return [];
 
     const expander = await getGraphExpander(this.projectId, this.config);
-    const { chunks, stats } = await expander.expand(seeds, queryTokens);
+    const { chunks, stats } = await expander.expand(seeds, queryTokens, {
+      expandNeighbors: plan.expandNeighbors,
+      expandDependencies: plan.expandDependencies,
+      dependencyDirection: plan.dependencyDirection,
+      dependencySeeds,
+      maxDependencyDepth: plan.dependencyMaxDepth,
+      maxDependencyFiles: plan.dependencyMaxFiles,
+      dependencyChunksPerFile: plan.dependencyChunksPerFile,
+      dependencyDecay: plan.dependencyDecay,
+    });
 
     logger.debug(stats, '上下文扩展统计');
 

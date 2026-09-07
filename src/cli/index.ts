@@ -9,4 +9,4 @@ export { runInitCommand } from './init.js';
 export { runModelCommand } from './model.js';
 export { ProgressBar, Spinner } from './progress.js';
 export { PromptCancelError } from './prompts.js';
-export { color, intro, log, note, outro, supportsAnsi, symbol, writeLine } from './theme.js';
+export { color, intro, log, symbol, writeLine } from './theme.js';

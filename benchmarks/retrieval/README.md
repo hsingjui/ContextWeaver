@@ -11,7 +11,7 @@ pnpm benchmark:retrieval
 By default the runner refreshes the repository index first and writes:
 
 ```text
-benchmarks/retrieval/results/baseline.json
+benchmarks/retrieval/results/latest.json
 ```
 
 Useful options:
@@ -22,7 +22,7 @@ pnpm benchmark:retrieval -- --output benchmarks/retrieval/results/exact-symbol.j
 pnpm benchmark:retrieval -- --repo /path/to/repository
 ```
 
-`benchmarks/` is excluded from the indexed corpus so benchmark questions and labels cannot leak into retrieval results.
+The benchmark uses a dedicated project/index snapshot and excludes `tests/`, `test/`, `__tests__/`, and `benchmarks/` from its corpus. This keeps benchmark questions/labels and test fixtures out of retrieval results without changing the normal ContextWeaver index.
 
 ## v1 cases
 
@@ -51,3 +51,22 @@ Metrics are computed from the final packed file ranking:
 - **Latency**: average and p50 retrieve, rerank, and total query time.
 
 The JSON result also keeps `seeds`, `expanded`, and final packed file summaries for failure diagnosis without storing source-code contents.
+
+## Strict A/B comparison on a frozen corpus
+
+Schema v2 records SHA-256 fingerprints for the corpus snapshot, cases file, search config, and corpus rules, plus model and Git metadata. `compare.ts` refuses incompatible snapshots by default instead of reporting a misleading delta.
+
+For an algorithm-only A/B, build the isolated benchmark index once for the baseline, then reuse that same frozen index for the candidate:
+
+```bash
+pnpm benchmark:retrieval -- --output benchmarks/retrieval/results/baseline-v2.json
+# change retrieval code, but do not refresh the benchmark corpus
+pnpm benchmark:retrieval -- --no-index --output benchmarks/retrieval/results/candidate-v2.json
+pnpm benchmark:retrieval:compare -- \
+  --baseline benchmarks/retrieval/results/baseline-v2.json \
+  --candidate benchmarks/retrieval/results/candidate-v2.json
+```
+
+Legacy schema-v1 results do not contain enough metadata for a strict comparison and must be regenerated. If a specific experiment intentionally changes exactly one controlled dimension, the comparator exposes explicit `--allow-model-change`, `--allow-corpus-change`, or `--allow-search-config-change` flags.
+
+The comparison reports overall quality/size/latency deltas and per-category Top-1/coverage deltas.
