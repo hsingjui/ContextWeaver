@@ -442,3 +442,118 @@ test('nested ignore rules, IGNORE_PATTERNS overrides and separate repository sna
   await fs.rm(root, { recursive: true, force: true });
   await fs.rm(other, { recursive: true, force: true });
 });
+
+test('generateProjectId 归一化路径拼写变体，同一目录产生同一 ID', async () => {
+  const root = path.resolve('test-output', `IdNormalize-${process.pid}`);
+  await fs.mkdir(root, { recursive: true });
+  const id = generateProjectId(root);
+  assert.equal(generateProjectId(`${root}/`), id);
+  assert.equal(generateProjectId(`${root}/.`), id);
+
+  const link = `${root}-link`;
+  await fs.rm(link, { force: true });
+  await fs.symlink(root, link);
+  assert.equal(generateProjectId(link), id);
+
+  // 大小写变体仅在大小写不敏感文件系统（macOS/Windows）上等价
+  const variant = root.toUpperCase() === root ? root.toLowerCase() : root.toUpperCase();
+  if (
+    variant !== root &&
+    (await fs
+      .stat(variant)
+      .then(() => true)
+      .catch(() => false))
+  ) {
+    assert.equal(generateProjectId(variant), id);
+  }
+
+  await fs.rm(link, { force: true });
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test('generateProjectId 不会合并大小写敏感文件系统上的不同目录', async () => {
+  const base = path.resolve('test-output', `IdCase-${process.pid}`);
+  const upper = path.join(base, 'Foo');
+  const lower = path.join(base, 'foo');
+  await fs.mkdir(upper, { recursive: true });
+  try {
+    const upperId = generateProjectId(upper);
+    let lowerExists = true;
+    try {
+      await fs.mkdir(lower, { recursive: true });
+    } catch {
+      lowerExists = false;
+    }
+    if (lowerExists) {
+      const upperIno = (await fs.stat(upper)).ino;
+      const lowerIno = (await fs.stat(lower)).ino;
+      if (upperIno !== lowerIno) {
+        // 大小写敏感文件系统：Foo 与 foo 是不同目录，ID 必须不同
+        assert.notEqual(generateProjectId(lower), upperId);
+      } else {
+        // 大小写不敏感文件系统：两个拼写命中同一目录，ID 必须相同
+        assert.equal(generateProjectId(lower), upperId);
+      }
+    }
+    // 大小写敏感系统上：不存在的 EXISTING 变体不得拿到已存在 Existing 目录的 ID
+    // （回归：修复前 canonicalCase 会把不存在的变体映射到同名目录）
+    const existing = path.join(base, 'Existing');
+    await fs.mkdir(existing, { recursive: true });
+    const existingId = generateProjectId(existing);
+    const variant = path.join(base, 'EXISTING');
+    const variantExists = await fs.stat(variant).then(
+      () => true,
+      () => false,
+    );
+    if (!variantExists) {
+      assert.notEqual(generateProjectId(variant), existingId);
+    }
+  } finally {
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('scan 进度在 Embedding 阶段持续可见且全程单调递增', async () => {
+  configure();
+  const root = path.join(fixture, 'progress');
+  await fs.mkdir(root, { recursive: true });
+  // 45 个文件仍在单个 scan 批次（batchSize=100）内，但 Embedding 文本数 >20，
+  // 索引阶段会分多个 API 批次多次回报进度。
+  for (let i = 0; i < 45; i++)
+    await fs.writeFile(path.join(root, `file-${i}.ts`), `const value${i} = ${i};`);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    const input: string[] = JSON.parse(String(options?.body)).input;
+    return response(input);
+  };
+  const steps: Array<{ current: number; message?: string }> = [];
+  try {
+    const stats = await scan(root, {
+      onProgress: (current, _total, message) => steps.push({ current, message }),
+    });
+    assert.equal(stats.vectorIndex?.indexed, 45);
+    assertProgressMonotonic(steps.map((step) => step.current));
+
+    // 修复前：扫描阶段已到 99%，Embedding 回报从 ~1% 重新计数，低于已过里程碑
+    // 被 ProgressBar 吞掉，表现为 92% 卡一百多秒。修复后 Embedding 阶段必须有
+    // 高于扫描末值、低于 99 的中间进度。
+    const scanValues = steps
+      .filter((step) => step.message === '正在扫描文件...')
+      .map((step) => step.current);
+    const lastScan = Math.max(...scanValues);
+    const embedMidsteps = steps
+      .filter((step) => step.message === '正在更新索引...')
+      .map((step) => step.current)
+      .filter((value) => value < 99);
+    assert.ok(
+      embedMidsteps.length > 0 && embedMidsteps.every((value) => value > lastScan),
+      `Embedding 阶段应有 (${lastScan}, 99) 区间的中间进度，实际序列: ${steps
+        .map((step) => step.current)
+        .join(',')}`,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await closeAllVectorStores();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

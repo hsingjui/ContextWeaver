@@ -60,15 +60,59 @@ function getDirectoryBirthtime(projectPath: string): number {
 }
 
 /**
+ * 归一化路径的大小写拼写
+ * 仅在路径按给定拼写真实存在（realpath 已成功）时调用。
+ * 大小写不敏感文件系统（macOS/Windows）上，LLM/MCP 客户端传入的大小写
+ * 变体会命中同一目录；逐段回读目录项的真实拼写，替换前校验两侧指向
+ * 同一物理目录（dev/ino 相同），避免把大小写敏感系统上的不同目录合并。
+ */
+function canonicalCase(normalized: string): string {
+  const { root } = path.parse(normalized);
+  let canonical = root;
+  for (const part of normalized.slice(root.length).split(path.sep)) {
+    if (!part) continue;
+    const entries = fs.readdirSync(canonical);
+    const exact = entries.find((entry) => entry === part);
+    if (exact) {
+      canonical = path.join(canonical, exact);
+      continue;
+    }
+    const candidate = entries.find((entry) => entry.toLowerCase() === part.toLowerCase());
+    if (!candidate) return normalized;
+    const given = fs.statSync(path.join(canonical, part));
+    const target = fs.statSync(path.join(canonical, candidate));
+    if (given.dev !== target.dev || given.ino !== target.ino) return normalized;
+    canonical = path.join(canonical, candidate);
+  }
+  return canonical;
+}
+
+/**
  * 生成项目唯一 ID
  * 基于路径 + 目录创建时间生成，确保删除后重建的同路径代码库会生成不同的 ID
  * @param projectPath 项目根路径
  * @returns 项目 ID (MD5 hash)
  */
 export function generateProjectId(projectPath: string): string {
-  const birthtime = getDirectoryBirthtime(projectPath);
-  const uniqueKey = `${projectPath}::${birthtime}`;
-  return crypto.createHash('md5').update(uniqueKey).digest('hex').slice(0, 10);
+  // 归一化路径拼写：不同调用方（CLI/MCP 客户端）可能传入尾斜杠、
+  // symlink 或大小写变体。未归一化时同一项目会生成多个 ID，
+  // 每次拼写变化都触发全量重索引并遗留孤儿目录。
+  // 大小写归一化仅对真实存在的路径执行：realpath 失败说明路径不存在
+  // （如重建中的代码库），退回 resolve 结果，避免在大小写敏感系统上
+  // 把不存在的路径映射到其他目录。
+  const resolved = path.resolve(projectPath);
+  try {
+    const normalized = canonicalCase(fs.realpathSync(resolved));
+    const birthtime = getDirectoryBirthtime(normalized);
+    return crypto
+      .createHash('md5')
+      .update(`${normalized}::${birthtime}`)
+      .digest('hex')
+      .slice(0, 10);
+  } catch {
+    const birthtime = getDirectoryBirthtime(resolved);
+    return crypto.createHash('md5').update(`${resolved}::${birthtime}`).digest('hex').slice(0, 10);
+  }
 }
 
 /**
