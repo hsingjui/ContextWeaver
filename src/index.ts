@@ -19,9 +19,10 @@ import {
   symbol,
   writeLine,
 } from './cli/index.js';
+import { parseJsonlLine, toCliSearchResult } from './cli/searchResult.js';
 import { generateProjectId } from './db/index.js';
 import { type ScanStats, scan } from './scanner/index.js';
-import { logger, setConsoleVerbose } from './utils/logger.js';
+import { logger, setConsoleTarget, setConsoleVerbose } from './utils/logger.js';
 
 // 读取 package.json 获取版本号
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -202,41 +203,167 @@ cli.command('mcp', '启动 MCP 服务器').action(async () => {
   }
 });
 
+type SearchOptions = {
+  repoPath?: string;
+  informationRequest?: string;
+  technicalTerms?: string;
+  json?: boolean;
+  jsonl?: boolean;
+};
+
+/** search 命令主体；错误统一由 action 包装处理，机器输出模式按行输出 {"error": ...}。 */
+async function runSearchAction(options: SearchOptions): Promise<void> {
+  const repoPath = options.repoPath ? path.resolve(options.repoPath) : process.cwd();
+  const informationRequest = options.informationRequest;
+
+  // 机器输出模式提前切换：stdout 只保留 JSON 流，日志（含校验失败提示）改走 stderr
+  if (options.json || options.jsonl) {
+    setConsoleVerbose(false);
+    setConsoleTarget(process.stderr);
+  }
+
+  if (!informationRequest && !options.jsonl) {
+    // 统一抛给 action 包装层：json/jsonl 模式输出 {"error": ...}，人读模式走日志。
+    // 不能在这里 process.exit，否则会绕过统一错误契约。
+    throw new Error('缺少 --information-request');
+  }
+
+  const technicalTerms = (options.technicalTerms || '')
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean);
+
+  if (options.jsonl) {
+    if (process.stdin.isTTY) {
+      throw new Error(
+        '--jsonl 需要管道输入，例如 cat queries.jsonl | contextweaver search --jsonl',
+      );
+    }
+    const { prepareCodebaseRetrieval, retrieveIndexedCodebase } = await import(
+      './mcp/tools/codebaseRetrieval.js'
+    );
+    const input = await new Promise<string>((resolve, reject) => {
+      let data = '';
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', (chunk) => {
+        data += chunk;
+      });
+      process.stdin.on('end', () => resolve(data));
+      process.stdin.on('error', reject);
+    });
+    const lines = input
+      .split('\n')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (lines.length === 0) throw new Error('JSONL input contains no queries');
+
+    // 先整体校验输入：若全是坏行，直接逐行输出错误并返回，
+    // 不触发索引准备 / 模型工作；否则坏行不终止批量，逐行输出对应错误。
+    const parsedRows = lines.map((line, index) => ({
+      index,
+      row: parseJsonlLine(line, index + 1),
+    }));
+    if (!parsedRows.some(({ row }) => row.ok)) {
+      for (const { row } of parsedRows) {
+        if (!row.ok) process.stdout.write(`${JSON.stringify({ error: row.error })}\n`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    const progressWrite = (text: string) => process.stderr.write(text);
+    const indexProgress = new ProgressBar({
+      label: '索引准备',
+      write: progressWrite,
+      useAnsi: false,
+    });
+    indexProgress.start();
+    await prepareCodebaseRetrieval(repoPath, (current, total, message) => {
+      indexProgress.update(current, total ?? 100, message);
+    });
+    indexProgress.done('索引已就绪');
+
+    process.stderr.write(`开始检索 ${parsedRows.length} 条 query\n`);
+    const startedAt = Date.now();
+    let lineFailed = false;
+    for (const { index, row } of parsedRows) {
+      const queryStartedAt = Date.now();
+      const prefix = `[${String(index + 1).padStart(String(lines.length).length)}/${lines.length}] `;
+      if (!row.ok) {
+        // 坏行不终止批量：该行输出 {"error": ...}，继续处理后续行，最终以非零码收尾
+        lineFailed = true;
+        process.stdout.write(`${JSON.stringify({ error: row.error })}\n`);
+        process.stderr.write(`${prefix}失败: ${row.error}\n`);
+        continue;
+      }
+      const query = row.query;
+      try {
+        const contextPack = await retrieveIndexedCodebase({
+          repo_path: repoPath,
+          information_request: query.information_request,
+          technical_terms: query.technical_terms,
+        });
+        process.stdout.write(`${JSON.stringify(toCliSearchResult(contextPack))}\n`);
+        const queryMs = Date.now() - queryStartedAt;
+        const elapsedMs = Date.now() - startedAt;
+        process.stderr.write(
+          `${prefix}完成 ${queryMs} ms · 累计 ${(elapsedMs / 1000).toFixed(1)}s\n`,
+        );
+      } catch (err) {
+        // 坏行不终止批量：该行输出 {"error": ...}，继续处理后续行，最终以非零码收尾
+        lineFailed = true;
+        const message = err instanceof Error ? err.message : String(err);
+        process.stdout.write(`${JSON.stringify({ error: message })}\n`);
+        process.stderr.write(`${prefix}失败: ${message}\n`);
+      }
+    }
+    if (lineFailed) process.exitCode = 1;
+    return;
+  }
+
+  const retrievalInput = {
+    repo_path: repoPath,
+    information_request: informationRequest as string,
+    technical_terms: technicalTerms.length > 0 ? technicalTerms : undefined,
+  };
+
+  if (options.json) {
+    const { retrieveCodebase } = await import('./mcp/tools/codebaseRetrieval.js');
+    const contextPack = await retrieveCodebase(retrievalInput);
+    process.stdout.write(`${JSON.stringify(toCliSearchResult(contextPack))}\n`);
+    return;
+  }
+
+  const { handleCodebaseRetrieval } = await import('./mcp/tools/codebaseRetrieval.js');
+  const response = await handleCodebaseRetrieval(retrievalInput);
+  const text = response.content.map((item) => item.text).join('\n');
+  process.stdout.write(`${text}\n`);
+}
+
 cli
   .command('search', '本地检索（参数对齐 MCP）')
   .option('--repo-path <path>', '代码库根目录（默认当前目录）')
   .option('--information-request <text>', '自然语言问题描述（必填）')
-  .option('--technical-terms <terms>', '精确术语（逗号分隔）')
-  .action(
-    async (options: {
-      repoPath?: string;
-      informationRequest?: string;
-      technicalTerms?: string;
-    }) => {
-      const repoPath = options.repoPath ? path.resolve(options.repoPath) : process.cwd();
-      const informationRequest = options.informationRequest;
-      if (!informationRequest) {
-        logger.error('缺少 --information-request');
-        process.exit(1);
+  .option(
+    '--technical-terms <terms>',
+    '精确术语（逗号分隔；--jsonl 模式下忽略，以每行查询的 technical_terms 为准）',
+  )
+  .option('--json', '以 JSON 输出结构化检索结果')
+  .option('--jsonl', '从标准输入读取 JSONL 查询并逐行输出 JSON 结果')
+  .action(async (options: SearchOptions) => {
+    try {
+      await runSearchAction(options);
+    } catch (err) {
+      // json/jsonl 契约：stdout 单行 {"error": ...}；人读模式简短提示，详情看日志
+      const message = err instanceof Error ? err.message : String(err);
+      if (options.json || options.jsonl) {
+        process.stdout.write(`${JSON.stringify({ error: message })}\n`);
+      } else {
+        logger.error({ err, consoleMessage: `检索失败: ${message}` }, `检索失败: ${message}`);
       }
-
-      const technicalTerms = (options.technicalTerms || '')
-        .split(',')
-        .map((t) => t.trim())
-        .filter(Boolean);
-
-      const { handleCodebaseRetrieval } = await import('./mcp/tools/codebaseRetrieval.js');
-
-      const response = await handleCodebaseRetrieval({
-        repo_path: repoPath,
-        information_request: informationRequest,
-        technical_terms: technicalTerms.length > 0 ? technicalTerms : undefined,
-      });
-
-      const text = response.content.map((item) => item.text).join('\n');
-      process.stdout.write(`${text}\n`);
-    },
-  );
+      process.exitCode = 1;
+    }
+  });
 
 cli.help((sections) => {
   const titles: Record<string, string> = {

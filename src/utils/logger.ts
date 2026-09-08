@@ -18,9 +18,20 @@ const LOG_RETENTION_DAYS = 7;
  */
 let consoleVerbose = true;
 
+/**
+ * 控制台日志输出目标。--json/--jsonl 模式下 stdout 承载机器消费的 JSON 流，
+ * 全部日志（含 warn/error）改走 stderr，避免污染。
+ */
+let consoleTarget: NodeJS.WriteStream = process.stdout;
+
 /** 设置控制台是否输出 info/debug 级日志（warn/error 始终输出） */
 export function setConsoleVerbose(enabled: boolean): void {
   consoleVerbose = enabled;
+}
+
+/** 设置控制台日志输出目标（--json/--jsonl 模式传 process.stderr） */
+export function setConsoleTarget(target: NodeJS.WriteStream): void {
+  consoleTarget = target;
 }
 
 function ensureLogDir(dir: string): void {
@@ -197,7 +208,7 @@ function createConsoleStream(): Writable {
         // 命令可提供简短终端提示；完整错误仍由文件日志流记录。
         if (typeof log.consoleMessage === 'string') {
           interruptLineRendering();
-          process.stdout.write(`${color}${log.consoleMessage}${reset}\n`, callback);
+          consoleTarget.write(`${color}${log.consoleMessage}${reset}\n`, callback);
           return;
         }
 
@@ -212,10 +223,10 @@ function createConsoleStream(): Writable {
 
         // 进度条 / Spinner 行内渲染期间先清除当前行，避免日志拼接在进度条后
         interruptLineRendering();
-        process.stdout.write(`${line}\n`, callback);
+        consoleTarget.write(`${line}\n`, callback);
       } catch {
         interruptLineRendering();
-        process.stdout.write(chunk.toString(), callback);
+        consoleTarget.write(chunk.toString(), callback);
       }
     },
   });

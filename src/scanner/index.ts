@@ -162,11 +162,12 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
           batchKnown.set(file, needsIndex ? { ...known, hash: '', mtime: -1 } : known);
         }
       }
+      // 批内进度分段：扫描占批距前半 [0,0.5)，Embedding/写索引占后半 [0.5,1)。
+      // 两阶段若共用整段批距会进度倒退，被 ProgressBar 的里程碑逻辑吞掉后表现为长时间卡住。
+      const batchProgress = (fraction: number) =>
+        Math.floor(((i + batch.length * fraction) / filePaths.length) * 99);
       const results = await processFiles(rootPath, batch, batchKnown, (done, total) => {
-        const progress = Math.floor(
-          ((i + (batch.length * done) / total) / filePaths.length) * 99,
-        );
-        options.onProgress?.(progress, 100, '正在扫描文件...');
+        options.onProgress?.(batchProgress((0.5 * done) / total), 100, '正在扫描文件...');
       });
       const toUpsert: FileMeta[] = [];
       const toUpdateMtime: Array<{ path: string; mtime: number; size: number }> = [];
@@ -219,21 +220,14 @@ export async function scan(rootPath: string, options: ScanOptions = {}): Promise
           db,
           [...toIndex, ...skippedPaths.map(deletedResult)],
           (done, total) => {
-            const progress = Math.floor(
-              ((i + (batch.length * done) / total) / filePaths.length) * 99,
-            );
-            options.onProgress?.(progress, 100, '正在更新索引...');
+            options.onProgress?.(batchProgress(0.5 + (0.5 * done) / total), 100, '正在更新索引...');
           },
         );
         stats.vectorIndex.indexed += result.indexed;
         stats.vectorIndex.deleted += result.deleted;
         stats.vectorIndex.errors += result.errors;
       }
-      options.onProgress?.(
-        Math.floor(((i + batch.length) / filePaths.length) * 99),
-        100,
-        '正在更新索引...',
-      );
+      options.onProgress?.(batchProgress(1), 100, '正在更新索引...');
       // results 和本批 embeddings 在进入下一批前可回收。
     }
     // Dependency edges are derived from indexed source content. A graph-version marker

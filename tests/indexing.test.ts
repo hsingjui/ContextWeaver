@@ -50,6 +50,18 @@ function response(input: string[]): Response {
   });
 }
 
+/** 断言 scan 进度序列有界且非递减（跨扫描/Embedding 阶段、跨批次），最终到 100。 */
+function assertProgressMonotonic(progress: number[]): void {
+  assert.ok(progress.length > 0, '应至少收到一次进度回调');
+  for (const [k, value] of progress.entries()) {
+    assert.ok(Number.isInteger(value) && value >= 0 && value <= 100, `进度越界: ${value}`);
+    if (k > 0) {
+      assert.ok(value >= progress[k - 1], `进度倒退: ${progress[k - 1]} -> ${value}`);
+    }
+  }
+  assert.equal(progress.at(-1), 100);
+}
+
 // Budget checks apply to the final embedding text, including its prefix.
 test('all splitter exits are bounded, preserve Unicode/raw spans, and extract C declarators', async () => {
   const splitter = new SemanticSplitter({ maxChunkSize: 500, minChunkSize: 50, chunkOverlap: 40 });
@@ -382,13 +394,18 @@ test('scan commits bounded batches and retries only failed files', async () => {
     return response(input);
   };
   try {
-    const first = await scan(root);
+    const progress: number[] = [];
+    const onProgress = (current: number) => progress.push(current);
+    const first = await scan(root, { onProgress });
+    assertProgressMonotonic(progress); // 覆盖 100+1 两批的批间边界
     assert.equal(observedFileCounts[0], 100);
     assert.equal(observedFileCounts.at(-1), 101);
     assert.equal(first.vectorIndex?.errors, 50);
     assert.equal(first.vectorIndex?.indexed, 51);
     assert.equal(getFilesNeedingVectorIndex(db).length, 50);
-    const retry = await scan(root);
+    progress.length = 0;
+    const retry = await scan(root, { onProgress });
+    assertProgressMonotonic(progress);
     assert.equal(retry.vectorIndex?.indexed, 50);
     assert.equal(retry.vectorIndex?.errors, 0);
     assert.deepEqual(getFilesNeedingVectorIndex(db), []);

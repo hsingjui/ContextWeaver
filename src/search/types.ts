@@ -126,7 +126,7 @@ export interface ScoredChunk {
   record: ChunkRecord & { _distance: number };
 }
 
-/** 轻量排序快照，仅用于 benchmark/debug，不复制 chunk 文本。 */
+/** 轻量排序快照，用于结构化诊断输出，不复制 chunk 文本。 */
 export interface RankedChunkTrace {
   filePath: string;
   chunkIndex: number;

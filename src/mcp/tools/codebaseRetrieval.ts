@@ -121,7 +121,10 @@ async function ensureIndexed(
       }
 
       const startTime = Date.now();
-      const stats = await scan(repoPath, { vectorIndex: true, onProgress });
+      const stats = await scan(repoPath, {
+        vectorIndex: true,
+        onProgress,
+      });
       const errors = stats.errors + (stats.vectorIndex?.errors ?? 0);
       if (errors > 0) throw new Error(`索引有 ${errors} 个文件失败，请重试以补全索引`);
       const elapsed = Date.now() - startTime;
@@ -149,11 +152,102 @@ async function ensureIndexed(
 /** 进度回调类型 */
 export type ProgressCallback = (current: number, total?: number, message?: string) => void;
 
+async function assertRetrievalEnvironment(): Promise<void> {
+  const { checkEmbeddingEnv, checkRerankerEnv } = await import('../../config.js');
+  const missingVars = [...checkEmbeddingEnv().missingVars, ...checkRerankerEnv().missingVars];
+  if (missingVars.length > 0) {
+    throw new Error(`Missing retrieval environment variables: ${missingVars.join(', ')}`);
+  }
+}
+
+/** CLI/MCP 内部使用：确保检索环境与索引已就绪。 */
+export async function prepareCodebaseRetrieval(
+  repoPath: string,
+  onProgress?: ProgressCallback,
+): Promise<void> {
+  await assertRetrievalEnvironment();
+  await ensureIndexed(repoPath, generateProjectId(repoPath), onProgress);
+}
+
 /**
- * 处理 codebase-retrieval 工具调用
- *
- * @param args 工具输入参数
- * @param onProgress 可选的进度回调（用于 MCP 进度通知）
+ * 在索引已就绪的前提下执行一次结构化检索。
+ * 仅供同一 CLI 进程的批量模式复用，不作为 package API 暴露。
+ */
+export async function retrieveIndexedCodebase(args: CodebaseRetrievalInput): Promise<ContextPack> {
+  const { repo_path, information_request, technical_terms } = args;
+  // 环境校验由 prepareCodebaseRetrieval 统一完成（本函数所有调用方均先经 prepare）
+  const projectId = generateProjectId(repo_path);
+
+  const query = [information_request, ...(technical_terms || [])].filter(Boolean).join(' ');
+  logger.info({ projectId: projectId.slice(0, 10), query }, '检索查询构建');
+
+  const { SearchService } = await import('../../search/SearchService.js');
+  const service = new SearchService(projectId, repo_path);
+  await service.init();
+  logger.debug('SearchService 初始化完成');
+
+  const contextPack = await service.buildContextPack(query);
+
+  if (contextPack.seeds.length > 0) {
+    logger.info(
+      {
+        seeds: contextPack.seeds.map((seed) => ({
+          file: seed.filePath,
+          chunk: seed.chunkIndex,
+          score: seed.score.toFixed(4),
+          source: seed.source,
+        })),
+      },
+      '检索 seeds',
+    );
+  } else {
+    logger.warn('检索无 seeds 命中');
+  }
+
+  if (contextPack.expanded.length > 0) {
+    logger.debug(
+      {
+        expandedCount: contextPack.expanded.length,
+        expanded: contextPack.expanded.slice(0, 5).map((item) => ({
+          file: item.filePath,
+          chunk: item.chunkIndex,
+          score: item.score.toFixed(4),
+        })),
+      },
+      '检索扩展结果 (前5)',
+    );
+  }
+
+  logger.info(
+    {
+      seedCount: contextPack.seeds.length,
+      expandedCount: contextPack.expanded.length,
+      fileCount: contextPack.files.length,
+      totalSegments: contextPack.files.reduce((acc, file) => acc + file.segments.length, 0),
+      files: contextPack.files.map((file) => ({
+        path: file.filePath,
+        segments: file.segments.length,
+        lines: file.segments.map((segment) => `L${segment.startLine}-${segment.endLine}`),
+      })),
+      timingMs: contextPack.debug?.timingMs,
+    },
+    '代码库检索完成',
+  );
+
+  return contextPack;
+}
+
+/** 单次检索：自动刷新索引后执行。 */
+export async function retrieveCodebase(
+  args: CodebaseRetrievalInput,
+  onProgress?: ProgressCallback,
+): Promise<ContextPack> {
+  await prepareCodebaseRetrieval(args.repo_path, onProgress);
+  return retrieveIndexedCodebase(args);
+}
+
+/**
+ * 处理 codebase-retrieval MCP 工具调用。
  */
 export async function handleCodebaseRetrieval(
   args: CodebaseRetrievalInput,
@@ -162,15 +256,10 @@ export async function handleCodebaseRetrieval(
   const { repo_path, information_request, technical_terms } = args;
 
   logger.info(
-    {
-      repo_path,
-      information_request,
-      technical_terms,
-    },
+    { repo_path, information_request, technical_terms },
     'MCP codebase-retrieval 调用开始',
   );
 
-  // 0. 检查必需的环境变量是否已配置（Embedding + Reranker 都是必需的）
   const { checkEmbeddingEnv, checkRerankerEnv, getEmbeddingConfig } = await import(
     '../../config.js'
   );
@@ -191,86 +280,7 @@ export async function handleCodebaseRetrieval(
     });
   }
 
-  // 1. 生成项目 ID（与 CLI 保持一致：路径 + 目录创建时间）
-  const projectId = generateProjectId(repo_path);
-
-  // 2. 确保代码库已索引（自动初始化 + 增量更新）
-  await ensureIndexed(repo_path, projectId, onProgress);
-
-  // 3. 合并查询
-  // - information_request 驱动语义向量搜索
-  // - technical_terms 增强词法（FTS）匹配
-  const query = [information_request, ...(technical_terms || [])].filter(Boolean).join(' ');
-
-  logger.info(
-    {
-      projectId: projectId.slice(0, 10),
-      query,
-    },
-    'MCP 查询构建',
-  );
-
-  // 4. 延迟导入 SearchService（避免 MCP 启动时加载 native 模块）
-  const { SearchService } = await import('../../search/SearchService.js');
-
-  // 5. 创建 SearchService 实例
-  const service = new SearchService(projectId, repo_path);
-  await service.init();
-  logger.debug('SearchService 初始化完成');
-
-  // 6. 执行搜索
-  const contextPack = await service.buildContextPack(query);
-
-  // 详细日志：seeds 信息
-  if (contextPack.seeds.length > 0) {
-    logger.info(
-      {
-        seeds: contextPack.seeds.map((s) => ({
-          file: s.filePath,
-          chunk: s.chunkIndex,
-          score: s.score.toFixed(4),
-          source: s.source,
-        })),
-      },
-      'MCP 搜索 seeds',
-    );
-  } else {
-    logger.warn('MCP 搜索无 seeds 命中');
-  }
-
-  // 详细日志：扩展结果
-  if (contextPack.expanded.length > 0) {
-    logger.debug(
-      {
-        expandedCount: contextPack.expanded.length,
-        expanded: contextPack.expanded.slice(0, 5).map((e) => ({
-          file: e.filePath,
-          chunk: e.chunkIndex,
-          score: e.score.toFixed(4),
-        })),
-      },
-      'MCP 扩展结果 (前5)',
-    );
-  }
-
-  // 详细日志：打包后的文件段落
-  logger.info(
-    {
-      seedCount: contextPack.seeds.length,
-      expandedCount: contextPack.expanded.length,
-      fileCount: contextPack.files.length,
-      totalSegments: contextPack.files.reduce((acc, f) => acc + f.segments.length, 0),
-      files: contextPack.files.map((f) => ({
-        path: f.filePath,
-        segments: f.segments.length,
-        lines: f.segments.map((s) => `L${s.startLine}-${s.endLine}`),
-      })),
-      timingMs: contextPack.debug?.timingMs,
-    },
-    'MCP codebase-retrieval 完成',
-  );
-
-  // 7. 格式化输出
+  const contextPack = await retrieveCodebase(args, onProgress);
   return formatMcpResponse(contextPack);
 }
 

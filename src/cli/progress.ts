@@ -65,7 +65,10 @@ export class ProgressBar {
     this.lastPercent = 0;
     if (this.useAnsi) {
       setLineInterrupt(() => this.eraseCurrentLine());
-      this.renderTimer = setInterval(() => this.renderFrame(this.lastPercent, this.lastMessage), 1000);
+      this.renderTimer = setInterval(
+        () => this.renderFrame(this.lastPercent, this.lastMessage),
+        1000,
+      );
     } else {
       this.nextMilestone = 0;
       this.lastPrintedPercent = -1;
@@ -112,7 +115,9 @@ export class ProgressBar {
         this.renderFrame(100, message ?? '完成', true);
         this.write('\n');
       }
-    } else if (this.lastPercent < 100) {
+    } else if (this.lastPrintedPercent < 100) {
+      // 依据已实际打印的百分比判断：update(100) 可能未跨里程碑而未输出，
+      // 但 lastPercent 已被置为 100，用它会漏掉收尾行。
       this.write(`${this.label} 100%${message ? ` ${symbol.dot} ${message}` : ''}\n`);
     }
     this.active = false;

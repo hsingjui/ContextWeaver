@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import path from 'node:path';
 import { test } from 'node:test';
 
 import { ProgressBar, Spinner } from '../src/cli/progress.js';
@@ -9,6 +11,29 @@ import { buildDefaultEnvContent, buildEnvContent, parseEnvVars } from '../src/ut
 function collect(): { chunks: string[]; write: (text: string) => void } {
   const chunks: string[] = [];
   return { chunks, write: (text: string) => chunks.push(text) };
+}
+
+const REPO_ROOT = path.resolve(import.meta.dirname, '..');
+
+/** 以子进程运行真实 CLI（tsx 直跑源码），供机器输出契约验证。 */
+function runCli(args: string[], input = ''): Promise<{ stdout: string; code: number | null }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts', ...args], {
+      cwd: REPO_ROOT,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    // stderr 保持消费，避免管道背压
+    child.stderr.on('data', () => undefined);
+    child.on('error', reject);
+    child.on('close', (code) => resolve({ stdout, code }));
+    child.stdin.end(input);
+  });
 }
 
 test('buildEnvContent 生成完整 Embedding + Reranker 配置', () => {
@@ -166,6 +191,62 @@ test('ProgressBar TTY 模式渲染限频，密集更新不刷屏', () => {
 
   // 10% 一帧，紧随其后的两帧被限频丢弃
   assert.equal(chunks.length, 1);
+  bar.done('');
+});
+
+test('ProgressBar 非 TTY 模式 update(100) 未跨里程碑时 done 补 100% 收尾行', () => {
+  const { chunks, write } = collect();
+  const bar = new ProgressBar({ write, useAnsi: false });
+
+  bar.start();
+  // 1% → 11% → ... → 91% 共 10 行；91% 后 nextMilestone 指向 101，update(100) 不会输出
+  for (let p = 1; p <= 100; p += 10) bar.update(p, 100);
+  bar.update(100, 100);
+  bar.done('索引已就绪');
+
+  assert.equal(chunks.length, 11);
+  assert.match(chunks[9], /91%/);
+  const last = chunks[chunks.length - 1];
+  assert.match(last, /100%/);
+  assert.match(last, /索引已就绪/);
+});
+
+test('ProgressBar 非 TTY 模式已打印 100% 时 done 不重复输出', () => {
+  const { chunks, write } = collect();
+  const bar = new ProgressBar({ write, useAnsi: false });
+
+  bar.start();
+  bar.update(100, 100);
+  bar.done('完成');
+
+  assert.equal(chunks.length, 1);
+  assert.match(chunks[0], /100%/);
+});
+
+test('search --json 缺少 --information-request 时 stdout 输出单行 JSON 错误且退出非零', async () => {
+  const { stdout, code } = await runCli(['search', '--json']);
+  assert.notEqual(code, 0);
+  const lines = stdout.split('\n').filter(Boolean);
+  assert.equal(lines.length, 1);
+  const parsed = JSON.parse(lines[0]) as { error?: string };
+  assert.ok(parsed.error, 'stdout 必须是单行 {"error": ...}');
+});
+
+test('search --jsonl 输入全为非法行时逐行输出 JSON 错误且不触发检索', async () => {
+  const input = ['{"technical_terms":"abc"}', 'not json', '{"information_request":"   "}'].join(
+    '\n',
+  );
+  const { stdout, code } = await runCli(
+    ['search', '--jsonl', '--repo-path', '/nonexistent'],
+    input,
+  );
+  assert.notEqual(code, 0);
+  const lines = stdout.trim().split('\n');
+  assert.equal(lines.length, 3, '每行输入对应一行输出');
+  for (const line of lines) {
+    const parsed = JSON.parse(line) as { error?: string };
+    assert.ok(parsed.error, `应为错误行: ${line}`);
+  }
 });
 
 test('Spinner 非 TTY 模式输出静态行并以结果行收尾', () => {
