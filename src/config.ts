@@ -372,8 +372,7 @@ const DEFAULT_EXCLUDE_PATTERNS = [
   '*.pb.go',
   '*.pb.ts',
 
-  // --- 6. 测试/评测噪音 (保留 *.test.ts，但剔除这些) ---
-  'benchmarks',
+  // --- 6. 测试噪音 (保留 *.test.ts，但剔除这些) ---
   '__snapshots__',
   'test/fixtures',
   'tests/fixtures',

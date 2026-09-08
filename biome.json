@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/dist", "!**/node_modules", "!.trellis", "!benchmarks/retrieval/results"]
+    "includes": ["**", "!**/dist", "!**/node_modules", "!.trellis"]
   },
   "formatter": {
     "enabled": true,

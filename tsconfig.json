@@ -11,5 +11,5 @@
     "resolveJsonModule": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src/**/*.ts", "benchmarks/**/*.ts"]
+  "include": ["src/**/*.ts"]
 }
