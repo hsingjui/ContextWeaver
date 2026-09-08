@@ -69,7 +69,9 @@ export class SearchService {
    */
   async buildContextPack(query: string): Promise<ContextPack> {
     const timingMs: Record<string, number> = {};
-    let t0 = Date.now();
+    // 检索自身耗时（不含索引准备 / service.init / 外层序列化），供基准测试使用
+    const startedAt = Date.now();
+    let t0 = startedAt;
 
     const plan = buildRetrievalPlan(query);
     const retrievalCalls: RetrievalCallTrace[] = [];
@@ -93,7 +95,7 @@ export class SearchService {
 
     // 4. Smart TopK Cutoff
     t0 = Date.now();
-    const cutoffSeeds = this.applySmartCutoff(reranked, plan.maxSeeds);
+    const cutoffSeeds = this.applySmartCutoff(reranked, plan);
     const graphAnchorTerms =
       plan.intent === 'reference' ? this.resolveGraphAnchorTerms(query) : undefined;
     // Import/dependency edges are contextual hints, not symbol-call evidence. Do not relabel or
@@ -123,6 +125,7 @@ export class SearchService {
     const packer = new ContextPacker(this.projectId, this.config);
     const files = await packer.pack(selected);
     timingMs.pack = Date.now() - t0;
+    timingMs.total = Date.now() - startedAt;
 
     return {
       query,
@@ -724,12 +727,12 @@ export class SearchService {
    * 智能截断策略（Anchor & Floor + Safe Harbor + Delta Guard）
    *
    * 核心逻辑：
-   * 1. 低置信熔断：topScore < floor → 返回 top1（CLI 友好）或空
+   * 1. 低置信保护：窄查询返回 top1；宽查询保留 RetrievalPlan 要求的不同文件数
    * 2. 动态阈值：max(floor, min(ratioThreshold, deltaThreshold))
    * 3. Safe Harbor：前 minK 个只检查 floor，不检查 ratio/delta
    * 4. 去重 + 补齐：cutoff 后去重，不足 minK 时从后续补齐
    */
-  private applySmartCutoff(candidates: ScoredChunk[], planMaxSeeds?: number): ScoredChunk[] {
+  private applySmartCutoff(candidates: ScoredChunk[], plan: RetrievalPlan): ScoredChunk[] {
     // 未启用时直接返回原列表
     if (!this.config.enableSmartTopK) {
       return candidates;
@@ -747,14 +750,23 @@ export class SearchService {
       smartMinK: minK,
       smartMaxK: configuredMaxK,
     } = this.config;
-    const maxK = Math.max(1, Math.min(configuredMaxK, planMaxSeeds ?? configuredMaxK));
+    const maxK = Math.max(1, Math.min(configuredMaxK, plan.maxSeeds));
+    const minSeedFiles = Math.max(1, Math.min(plan.minSeedFiles, maxK));
 
     const topScore = sorted[0].score;
 
-    // 低置信熔断/降级（CLI 友好：返回 top1）
+    // 对窄查询保留原来的低置信降级；宽查询则至少保住若干不同文件，
+    // 避免 reranker 绝对分偏低时把 overview/call-chain/compound 直接塌缩成 top1。
+    // 次级门槛 floor*ratio：候选连这道线都过不了说明整体是垃圾分数，不再硬凑文件。
     if (topScore < floor) {
-      logger.debug({ topScore, floor }, 'SmartTopK: Top1 below floor, returning top1 only');
-      return [sorted[0]];
+      const secondaryFloor = floor * ratio;
+      const eligible = sorted.filter((chunk) => chunk.score >= secondaryFloor);
+      const lowConfidenceSeeds = this.ensureMinSeedFiles([sorted[0]], eligible, minSeedFiles, maxK);
+      logger.debug(
+        { topScore, floor, secondaryFloor, minSeedFiles, pickedCount: lowConfidenceSeeds.length },
+        'SmartTopK: Top1 below floor, applying file-diversity safe harbor',
+      );
+      return lowConfidenceSeeds;
     }
 
     // 动态阈值计算（ratio + deltaAbs 护栏）
@@ -819,11 +831,22 @@ export class SearchService {
       }
     }
 
+    // 文件多样性补齐只能从 floor 以上的候选里选：
+    // 低于绝对置信度的候选是垃圾分数，不能为凑文件数捞回来。
+    const diversified = this.ensureMinSeedFiles(
+      deduped,
+      sorted.filter((chunk) => chunk.score >= floor),
+      minSeedFiles,
+      maxK,
+    );
+
     logger.debug(
       {
         originalCount: candidates.length,
         pickedCount: picked.length,
-        finalCount: deduped.length,
+        finalCount: diversified.length,
+        finalFiles: new Set(diversified.map((chunk) => chunk.filePath)).size,
+        minSeedFiles,
         topScore,
         floor,
         ratio,
@@ -835,7 +858,51 @@ export class SearchService {
       'SmartTopK: done',
     );
 
-    return deduped;
+    return diversified;
+  }
+
+  private ensureMinSeedFiles(
+    selected: ScoredChunk[],
+    ranked: ScoredChunk[],
+    minSeedFiles: number,
+    maxK: number,
+  ): ScoredChunk[] {
+    const result = this.dedupChunks(selected).slice(0, maxK);
+    const seenChunks = new Set(result.map((chunk) => this.chunkKey(chunk)));
+    const fileCounts = new Map<string, number>();
+    for (const chunk of result) {
+      fileCounts.set(chunk.filePath, (fileCounts.get(chunk.filePath) ?? 0) + 1);
+    }
+
+    for (const candidate of ranked) {
+      if (fileCounts.size >= minSeedFiles) break;
+      if (fileCounts.has(candidate.filePath)) continue;
+      if (seenChunks.has(this.chunkKey(candidate))) continue;
+
+      if (result.length >= maxK) {
+        let replaceIndex = -1;
+        for (let index = result.length - 1; index >= 0; index--) {
+          const existing = result[index];
+          if ((fileCounts.get(existing.filePath) ?? 0) > 1) {
+            replaceIndex = index;
+            break;
+          }
+        }
+        if (replaceIndex < 0) break;
+
+        const removed = result.splice(replaceIndex, 1)[0];
+        seenChunks.delete(this.chunkKey(removed));
+        const remaining = (fileCounts.get(removed.filePath) ?? 1) - 1;
+        if (remaining <= 0) fileCounts.delete(removed.filePath);
+        else fileCounts.set(removed.filePath, remaining);
+      }
+
+      result.push(candidate);
+      seenChunks.add(this.chunkKey(candidate));
+      fileCounts.set(candidate.filePath, 1);
+    }
+
+    return result.sort((a, b) => b.score - a.score);
   }
 
   /**

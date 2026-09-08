@@ -21,6 +21,7 @@ export interface RetrievalPlan {
   dependencyChunksPerFile: number;
   dependencyDecay: number;
   maxSeeds: number;
+  minSeedFiles: number;
 }
 
 const SYMBOL_CUES = [
@@ -131,6 +132,7 @@ export function buildRetrievalPlan(query: string): RetrievalPlan {
         dependencyChunksPerFile: 0,
         dependencyDecay: 0.65,
         maxSeeds: 4,
+        minSeedFiles: 1,
       };
     case 'path':
       return {
@@ -147,6 +149,7 @@ export function buildRetrievalPlan(query: string): RetrievalPlan {
         dependencyChunksPerFile: 0,
         dependencyDecay: 0.65,
         maxSeeds: 4,
+        minSeedFiles: 1,
       };
     case 'overview':
       return {
@@ -163,6 +166,7 @@ export function buildRetrievalPlan(query: string): RetrievalPlan {
         dependencyChunksPerFile: 0,
         dependencyDecay: 0.65,
         maxSeeds: 6,
+        minSeedFiles: 4,
       };
     case 'reference':
       return {
@@ -181,6 +185,7 @@ export function buildRetrievalPlan(query: string): RetrievalPlan {
         // Reverse-import traversal is supporting dependency context, not caller evidence.
         dependencyDecay: 0.55,
         maxSeeds: 3,
+        minSeedFiles: 2,
       };
     case 'call-chain':
       return {
@@ -197,6 +202,7 @@ export function buildRetrievalPlan(query: string): RetrievalPlan {
         dependencyChunksPerFile: 1,
         dependencyDecay: 0.65,
         maxSeeds: 4,
+        minSeedFiles: 3,
       };
     case 'compound':
       return {
@@ -213,6 +219,7 @@ export function buildRetrievalPlan(query: string): RetrievalPlan {
         dependencyChunksPerFile: 1,
         dependencyDecay: 0.65,
         maxSeeds: 8,
+        minSeedFiles: 4,
       };
     default:
       return {
@@ -229,6 +236,7 @@ export function buildRetrievalPlan(query: string): RetrievalPlan {
         dependencyChunksPerFile: 0,
         dependencyDecay: 0.65,
         maxSeeds: 4,
+        minSeedFiles: 1,
       };
   }
 }

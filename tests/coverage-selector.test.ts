@@ -212,7 +212,20 @@ test('SearchService passes coverage-selected chunks to ContextPacker', async () 
       ['a.ts#0', 'b.ts#0', 'a.ts#1'],
     );
     assert.deepEqual(result.files, []);
-    assert.ok(result.debug?.timingMs.select !== undefined);
+    assert.ok(result.debug, '检索结果应包含 debug 诊断');
+    const timing = result.debug.timingMs;
+    assert.ok(timing.select !== undefined);
+    assert.ok(
+      timing.total !== undefined &&
+        timing.total >=
+          timing.retrieve +
+            timing.rerank +
+            timing.smartCutoff +
+            timing.expand +
+            timing.select +
+            timing.pack,
+      'timingMs.total 应覆盖检索全部阶段',
+    );
   } finally {
     ContextPacker.prototype.pack = originalPack;
   }
